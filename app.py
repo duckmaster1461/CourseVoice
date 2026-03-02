@@ -1,11 +1,11 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import json
 import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
+import urllib.request
 
 st.set_page_config(
     page_title="CourseVoice",
@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-DB_PATH = Path("coursevoice.db")
+DATA_PATH = Path("coursevoice.json")
 
 for k, v in {
     "dark_mode": True,
@@ -31,52 +31,81 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-def get_conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
-
 def hpw(p): return hashlib.sha256(p.encode()).hexdigest()
 
-def init_db():
-    db = get_conn(); c = db.cursor()
-    c.executescript("""
-        CREATE TABLE IF NOT EXISTS admins(
-            id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT);
-        CREATE TABLE IF NOT EXISTS subjects(
-            id INTEGER PRIMARY KEY, name TEXT UNIQUE, active INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS questions(
-            id INTEGER PRIMARY KEY, question_text TEXT NOT NULL,
-            question_type TEXT NOT NULL, order_num INTEGER DEFAULT 0, active INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS semester_links(
-            id INTEGER PRIMARY KEY, label TEXT NOT NULL, token TEXT UNIQUE NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS responses(
-            id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL, subject_name TEXT,
-            answers_json TEXT NOT NULL, submitted_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    """)
-    c.execute("INSERT OR IGNORE INTO admins(username, password_hash) VALUES(?,?)",
-              ("admin", hpw("admin123")))
-    if not c.execute("SELECT COUNT(*) FROM questions").fetchone()[0]:
-        c.executemany("INSERT INTO questions(question_text, question_type, order_num) VALUES(?,?,?)", [
-            ("Which subject is this about?", "dropdown", 1),
-            ("How has this course helped you?", "text", 2),
-            ("How difficult was the course?", "rating", 3),
-            ("Do you think the course should be offered again?", "yes_no", 4),
-        ])
-    for s in ["AP Physics 1","IB English HL","IB English SL","IM 1","IM 2","IM 3","Physics","Symphonic Band"]:
-        c.execute("INSERT OR IGNORE INTO subjects(name) VALUES(?)", (s,))
-    db.commit(); db.close()
+def load_data():
+    if DATA_PATH.exists():
+        with open(DATA_PATH, "r") as f:
+            return json.load(f)
+    default = {
+        "admins": [{"id": 1, "username": "admin", "password_hash": hpw("admin123")}],
+        "subjects": [
+            {"id": i+1, "name": s, "active": 1}
+            for i, s in enumerate(["AP Physics 1","IB English HL","IB English SL",
+                                   "IM 1","IM 2","IM 3","Physics","Symphonic Band"])
+        ],
+        "questions": [
+            {"id": 1, "question_text": "Which subject is this about?",                    "question_type": "dropdown", "order_num": 1, "active": 1, "ai_moderated": 0},
+            {"id": 2, "question_text": "How has this course helped you?",                  "question_type": "text",     "order_num": 2, "active": 1, "ai_moderated": 1},
+            {"id": 3, "question_text": "How difficult was the course?",                    "question_type": "rating",   "order_num": 3, "active": 1, "ai_moderated": 0},
+            {"id": 4, "question_text": "Do you think the course should be offered again?", "question_type": "yes_no",   "order_num": 4, "active": 1, "ai_moderated": 0},
+        ],
+        "semester_links": [],
+        "responses": [],
+        "_next_ids": {"subjects": 9, "questions": 5, "semester_links": 1, "responses": 1}
+    }
+    save_data(default)
+    return default
 
-init_db()
+def save_data(data):
+    with open(DATA_PATH, "w") as f:
+        json.dump(data, f, indent=2)
 
-TOKEN      = st.query_params.get("token", None)
-ADMIN_PARAM= st.query_params.get("admin", None)
-DARK       = st.session_state.dark_mode
-IS_ADMIN   = (ADMIN_PARAM is not None or st.session_state.admin_logged_in) and TOKEN is None
-ACC        = "#FFD700"
+def next_id(data, table):
+    nid = data["_next_ids"].get(table, 1)
+    data["_next_ids"][table] = nid + 1
+    return nid
 
-# ── colour tokens ──────────────────────────────────────────────────────────────
+def moderate_answer(question_text, answer_text):
+    """Returns (is_acceptable, feedback_message) using Gemini."""
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyB01jvEgsqQMg3Y2vo0b-0aE0CUTd3x6CQ"
+    prompt = f"""You are moderating a student course feedback survey.
+
+Question: "{question_text}"
+Student's answer: "{answer_text}"
+
+Determine if this answer:
+1. Actually attempts to answer the question
+2. Is constructive (not gibberish, spam, or purely offensive)
+
+Respond with ONLY a JSON object like:
+{{"acceptable": true}}
+or
+{{"acceptable": false, "reason": "brief explanation for the student"}}"""
+
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}]
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read())
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            parsed = json.loads(text)
+            if parsed.get("acceptable", True):
+                return True, None
+            else:
+                return False, parsed.get("reason", "Please provide a more constructive answer.")
+    except Exception:
+        return True, None  # Fail open if API is unreachable
+
+TOKEN       = st.query_params.get("token", None)
+ADMIN_PARAM = st.query_params.get("admin", None)
+DARK        = st.session_state.dark_mode
+IS_ADMIN    = (ADMIN_PARAM is not None or st.session_state.admin_logged_in) and TOKEN is None
+ACC         = "#FFD700"
+
 if IS_ADMIN:
     BG   = "#4a6295"
     FG   = "#ffffff"
@@ -99,223 +128,165 @@ else:
     MUTED= "#777777"
     CARD = "#ffffff"
 
-BTN_BG  = "#1a1a1a" if not IS_ADMIN else "transparent"
-BTN_FG  = "#ffffff" if not IS_ADMIN else ACC
+if IS_ADMIN:
+    BTN_BG   = "transparent"
+    BTN_FG   = ACC
+    RADIO_BG = "#1a1a1a"
+elif DARK:
+    BTN_BG   = "#1a1a1a"
+    BTN_FG   = "#ffffff"
+    RADIO_BG = "#1a1a1a"
+else:
+    BTN_BG   = INP
+    BTN_FG   = "#1a1a1a"
+    RADIO_BG = "#555555"
 
-# ── global CSS ─────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap');
 
-/* ensure predictable box model so borders/padding don't leak outside rounded corners */
-*, *::before, *::after, html, body, .stApp, [class*="css"] {{ box-sizing: border-box !important; }}
+*, *::before, *::after, html, body, .stApp, [class*="css"] {{ box-sizing: border-box; }}
+*, html, body, [class*="css"] {{ font-family: 'Sora', sans-serif; }}
 
-*, html, body, [class*="css"] {{ font-family: 'Sora', sans-serif !important; }}
+div[data-testid="stHorizontalBlock"] {{ align-items: center; }}
 
-div[data-testid="stHorizontalBlock"] {{
-    align-items: center !important;
-}}
+.stButton {{ display: flex; justify-content: center; width: 100%; }}
+.stButton > button {{ width: auto; min-width: unset; }}
 
-.stButton {{
-    display: flex !important;
-    justify-content: center !important;
-    width: 100% !important;
-}}
-.stButton > button {{
-    width: auto !important;
-    min-width: unset !important;
-}}
-            
 .stTextInput > div,
-.stTextInput > div > div {{
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}}
-
+.stTextInput > div > div {{ border-radius: 12px; overflow: hidden; }}
 .stSelectbox > div,
-.stSelectbox > div > div {{
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}}
-            
+.stSelectbox > div > div {{ border-radius: 12px; overflow: hidden; }}
+
 .stTextInput [data-testid="stWidgetLabel"],
 .stSelectbox [data-testid="stWidgetLabel"],
 .stTextArea [data-testid="stWidgetLabel"] {{
-    display: none !important;
-    min-height: 0 !important;
-    height: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    display: none; min-height: 0; height: 0; margin: 0; padding: 0;
 }}
 
-/* page */
 html, body, .stApp,
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"],
-section[data-testid="stMainBlockContainer"] {{
-    background-color: {BG} !important;
-}}
+section[data-testid="stMainBlockContainer"] {{ background-color: {BG}; }}
 .block-container {{
-    background: transparent !important;
-    padding: 1.4rem 2.2rem !important;
-    max-width: 900px !important;
-    margin: 0 auto !important;
+    background: transparent;
+    padding: 1.4rem 2.2rem;
+    max-width: 900px;
+    margin: 0 auto;
 }}
 #MainMenu, footer, header, [data-testid="stToolbar"],
-div[data-testid="stDecoration"] {{ visibility: hidden !important; display: none !important; }}
+div[data-testid="stDecoration"] {{ visibility: hidden; display: none; }}
 
-p, span, div, label, li {{ color: {FG} !important; }}
-h1,h2,h3,h4,h5,h6 {{ color: {FG} !important; }}
+p, span, div, label, li {{ color: {FG}; }}
+h1,h2,h3,h4,h5,h6 {{ color: {FG}; }}
 
-/* ── text inputs ── */
 .stTextInput > div > div > input,
 .stTextArea > div > div > textarea {{
-    background: {INP} !important;
-    color: {FG} !important;
-    border: 2px solid {BDR} !important;
-    border-radius: 12px !important;
-    padding: 10px 22px !important;
-    font-family: 'Sora', sans-serif !important;
-    font-size: 0.88rem !important;
-    box-shadow: none !important;
-    outline: none !important;
-    background-clip: padding-box !important;
+    background: {INP};
+    color: {FG};
+    border: 2px solid {BDR};
+    border-radius: 12px;
+    padding: 10px 22px;
+    font-family: 'Sora', sans-serif;
+    font-size: 0.88rem;
+    box-shadow: none;
+    outline: none;
+    background-clip: padding-box;
 }}
 .stTextInput > div > div > input::placeholder,
-.stTextArea > div > div > textarea::placeholder {{
-    color: {MUTED} !important;
-    opacity: 1 !important;
-}}
+.stTextArea > div > div > textarea::placeholder {{ color: {MUTED}; opacity: 1; }}
 .stTextInput > div > div > input:focus,
 .stTextArea > div > div > textarea:focus {{
-    border-color: {ACC} !important;
-    box-shadow: 0 0 0 1px {ACC}55 !important;
+    border-color: {ACC};
+    box-shadow: 0 0 0 1px {ACC}55;
 }}
 
-/* ── selectbox ── */
 .stSelectbox > div > div {{
-    background: {INP} !important;
-    color: {FG} !important;
-    border: 2px solid {BDR} !important;
-    border-radius: 12px !important;
-    box-shadow: none !important;
-    background-clip: padding-box !important;
+    background: {INP};
+    color: {FG};
+    border: 2px solid {BDR};
+    border-radius: 12px;
+    box-shadow: none;
+    background-clip: padding-box;
 }}
-.stSelectbox > div > div > div {{ color: {FG} !important; }}
-.stSelectbox > div > div svg {{ fill: {FG} !important; }}
-div[data-baseweb="popover"] li {{ color: #1a1a1a !important; }}
+.stSelectbox > div > div > div {{ color: {FG}; }}
+.stSelectbox > div > div svg {{ fill: {FG}; }}
+div[data-baseweb="popover"] li {{ color: #1a1a1a; }}
 
-/* ── ALL radio → pill/circle buttons ── */
-div[data-testid="stRadio"] > label {{ display: none !important; }}
+div[data-testid="stRadio"] > label {{ display: none; }}
 div[data-testid="stRadio"] [data-testid="stWidgetLabel"] {{
-    display: none !important;
-    height: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    min-height: 0 !important;
-}}div[data-testid="stRadio"] > div {{
-    flex-direction: row !important;
-    flex-wrap: wrap !important;
-    gap: 10px !important;
-    align-items: center !important;
+    display: none; height: 0; margin: 0; padding: 0; min-height: 0;
+}}
+div[data-testid="stRadio"] > div {{
+    flex-direction: row; flex-wrap: wrap; gap: 10px; align-items: center;
 }}
 div[data-testid="stRadio"] label {{
-    border: 2px solid {ACC} !important;
-    border-radius: 50px !important;
-    min-width: 48px !important;
-    height: 48px !important;
-    padding: 0 18px !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    cursor: pointer !important;
-    background: transparent !important;
-    color: {ACC} !important;
-    font-weight: 600 !important;
-    font-size: 0.9rem !important;
-    margin: 0 !important;
-    transition: background 0.15s, color 0.15s !important;
-    white-space: nowrap !important;
-    box-sizing: border-box !important;
-    overflow: hidden !important;
-    position: relative !important;
-    background-clip: padding-box !important;
-    -webkit-background-clip: padding-box !important;
-    z-index: 0 !important;
+    border: 2px solid {BDR};
+    border-radius: 50px;
+    min-width: 48px;
+    height: 48px;
+    padding: 0 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    background: {RADIO_BG};
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    margin: 0;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+    box-sizing: border-box;
+    overflow: hidden;
+    position: relative;
+    background-clip: padding-box;
+    -webkit-background-clip: padding-box;
+    z-index: 0;
 }}
-div[data-testid="stRadio"] label:hover {{
+div[data-testid="stRadio"] label:hover {{ background: {BDR}; color: #1a1a1a; }}
+div[data-testid="stRadio"] label:has(input:checked) {{
     background: {ACC} !important;
     color: #111 !important;
+    border-color: {ACC} !important;
 }}
-/* Use a more compatible checked rule (checked input inside label -> label gets active styles) */
-div[data-testid="stRadio"] label input:checked + span,
-div[data-testid="stRadio"] label input:checked ~ span {{
-    background: {ACC} !important;
-    color: #111 !important;
-}}
-/* Hide EVERYTHING inside the label except the last child (the text div) */
 div[data-testid="stRadio"] label > *:not(:last-child) {{
-    display: none !important;
-    width: 0 !important;
-    height: 0 !important;
-    position: absolute !important;
-    visibility: hidden !important;
-    overflow: hidden !important;
-    pointer-events: none !important;
+    display: none; width: 0; height: 0; position: absolute;
+    visibility: hidden; overflow: hidden; pointer-events: none;
 }}
-/* Make the text div fill properly */
 div[data-testid="stRadio"] label > *:last-child {{
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    display: flex; align-items: center; justify-content: center; margin: 0; padding: 0;
 }}
 div[data-testid="stRadio"] label > *:last-child p {{
-    margin: 0 !important;
-    color: inherit !important;
-    font-size: inherit !important;
-    font-weight: inherit !important;
+    margin: 0; color: inherit; font-size: inherit; font-weight: inherit;
 }}
 
-/* VERTICAL radio (sort buttons stacked) */
-div[data-testid="stRadio"].vertical-radio > div {{
-    flex-direction: column !important;
-    align-items: flex-start !important;
-}}
-
-/* ── main buttons ── */
 .stButton > button {{
-    background: transparent !important;
-    overflow: visible !important;
-    color: {ACC} !important;
-    border: 2.5px solid {ACC} !important;
-    border-radius: 30px !important;
-    padding: 11px 32px !important;
-    font-weight: 700 !important;
-    letter-spacing: 1.5px !important;
-    text-transform: uppercase !important;
-    font-size: 0.82rem !important;
-    font-family: 'Sora', sans-serif !important;
-    transition: all 0.17s !important;
-    white-space: nowrap !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    background-clip: padding-box !important;
+    background: transparent;
+    overflow: visible;
+    color: {ACC};
+    border: 2.5px solid {ACC};
+    border-radius: 30px;
+    padding: 11px 32px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-size: 0.82rem;
+    font-family: 'Sora', sans-serif;
+    transition: all 0.17s;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
-.stButton > button:hover {{
-    background: {ACC} !important;
-    color: #111 !important;
-    transform: translateY(-1px) !important;
-}}
+.stButton > button:hover {{ background: {ACC}; color: #111; transform: translateY(-1px); }}
 
-/* submit button (black/dark) */
-.submit-btn .stButton > button {{
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button {{
     background: {BTN_BG} !important;
     color: {BTN_FG} !important;
-    border: none !important;
+    border: 2px solid {BDR} !important;
     border-radius: 8px !important;
     padding: 14px 40px !important;
     letter-spacing: 2px !important;
@@ -326,227 +297,191 @@ div[data-testid="stRadio"].vertical-radio > div {{
     justify-content: center !important;
     box-sizing: border-box !important;
 }}
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button p,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button span,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button div {{
+    color: {BTN_FG} !important;
+}}
 
-/* logout button — compact pill, never tall */
-.logout-btn {{ display: flex !important; justify-content: flex-end !important; }}
+.logout-btn {{ display: flex; justify-content: flex-end; }}
 .logout-btn .stButton > button {{
-    border-radius: 30px !important;
-    padding: 9px 22px !important;
-    letter-spacing: 0.5px !important;
-    font-size: 0.78rem !important;
-    white-space: nowrap !important;
-    min-width: 100px !important;
-    width: auto !important;
-    height: auto !important;
-    text-transform: uppercase !important;
-    font-weight: 700 !important;
-    word-break: keep-all !important;
-    overflow: hidden !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    background-clip: padding-box !important;
+    border-radius: 30px;
+    padding: 9px 22px;
+    letter-spacing: 0.5px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    min-width: 100px;
+    width: auto;
+    height: auto;
+    text-transform: uppercase;
+    font-weight: 700;
+    word-break: keep-all;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
 
-/* back button */
 .back-btn .stButton > button {{
-    border-radius: 30px !important;
-    padding: 8px 22px !important;
-    font-size: 0.82rem !important;
-    letter-spacing: 0.5px !important;
-    text-transform: uppercase !important;
+    border-radius: 30px;
+    padding: 8px 22px;
+    font-size: 0.82rem;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
 }}
 
-/* semester/subject pills (outline, wider) */
 .pill-btn .stButton > button {{
-    border-radius: 12px !important;
-    text-transform: uppercase !important;
-    letter-spacing: 1px !important;
-    font-size: 0.82rem !important;
-    padding: 14px 20px !important;
-    width: 100% !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 0.82rem;
+    padding: 14px 20px;
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
 }}
-.pill-btn .stButton > button:hover {{
-    background: {ACC} !important;
-    color: #111 !important;
-}}
+.pill-btn .stButton > button:hover {{ background: {ACC}; color: #111; }}
 
-/* admin large action buttons (outline style) */
 .admin-action .stButton > button {{
-    border-radius: 40px !important;
-    text-transform: uppercase !important;
-    letter-spacing: 2px !important;
-    font-size: 0.88rem !important;
-    padding: 18px 40px !important;
-    width: 100% !important;
+    border-radius: 40px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 0.88rem;
+    padding: 18px 40px;
+    width: 100%;
 }}
 
-/* remove (−) circle — prevent column from stretching it oval */
-.rem-btn {{ display: flex !important; justify-content: center !important; }}
-.rem-btn .stButton {{ max-width: 42px !important; width: 42px !important; }}
+.rem-btn {{ display: flex; justify-content: center; }}
+.rem-btn .stButton {{ max-width: 42px; width: 42px; }}
 .rem-btn .stButton > button {{
-    background: transparent !important;
-    color: {ACC} !important;
-    border: 2px solid {ACC} !important;
-    border-radius: 50% !important;
-    width: 38px !important;
-    height: 38px !important;
-    min-width: 38px !important;
-    max-width: 38px !important;
-    padding: 0 !important;
-    font-size: 1.3rem !important;
-    line-height: 38px !important;
-    letter-spacing: 0 !important;
-    text-transform: none !important;
-    font-weight: 300 !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    background-clip: padding-box !important;
+    background: transparent;
+    color: {ACC};
+    border: 2px solid {ACC};
+    border-radius: 50%;
+    width: 38px; height: 38px; min-width: 38px; max-width: 38px;
+    padding: 0;
+    font-size: 1.3rem;
+    line-height: 38px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 300;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
 .rem-btn .stButton > button:hover {{
-    background: #e74c3c !important;
-    border-color: #e74c3c !important;
-    color: white !important;
-    transform: none !important;
+    background: #e74c3c; border-color: #e74c3c; color: white; transform: none;
 }}
 
-/* add (+) circle button — prevent column from stretching it oval */
-.add-btn {{ display: flex !important; justify-content: center !important; }}
-.add-btn .stButton {{ max-width: 42px !important; width: 42px !important; }}
+.add-btn {{ display: flex; justify-content: center; }}
+.add-btn .stButton {{ max-width: 42px; width: 42px; }}
 .add-btn .stButton > button {{
-    background: transparent !important;
-    color: {ACC} !important;
-    border: 2px solid {ACC} !important;
-    border-radius: 50% !important;
-    width: 38px !important;
-    height: 38px !important;
-    min-width: 38px !important;
-    max-width: 38px !important;
-    padding: 0 !important;
-    font-size: 1.3rem !important;
-    line-height: 38px !important;
-    letter-spacing: 0 !important;
-    text-transform: none !important;
-    font-weight: 300 !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    background-clip: padding-box !important;
+    background: transparent;
+    color: {ACC};
+    border: 2px solid {ACC};
+    border-radius: 50%;
+    width: 38px; height: 38px; min-width: 38px; max-width: 38px;
+    padding: 0;
+    font-size: 1.3rem;
+    line-height: 38px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 300;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
 .add-btn .stButton > button:hover {{
-    background: #27ae60 !important;
-    border-color: #27ae60 !important;
-    color: white !important;
-    transform: none !important;
+    background: #27ae60; border-color: #27ae60; color: white; transform: none;
 }}
 
-/* save button */
 .save-btn .stButton > button {{
-    background: rgba(20,35,80,0.5) !important;
-    color: white !important;
-    border: 1.5px solid rgba(255,255,255,0.4) !important;
-    border-radius: 10px !important;
-    text-transform: none !important;
-    letter-spacing: 0 !important;
-    padding: 10px 28px !important;
-    font-size: 0.88rem !important;
+    background: rgba(20,35,80,0.5);
+    color: white;
+    border: 1.5px solid rgba(255,255,255,0.4);
+    border-radius: 10px;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 10px 28px;
+    font-size: 0.88rem;
 }}
-.save-btn .stButton > button:hover {{
-    background: rgba(10,20,60,0.8) !important;
-    color: white !important;
-    transform: none !important;
-}}
+.save-btn .stButton > button:hover {{ background: rgba(10,20,60,0.8); color: white; transform: none; }}
 
-/* arrow button */
 .arrow-btn .stButton > button {{
-    border-radius: 50% !important;
-    min-width: 50px !important;
-    width: 50px !important;
-    height: 50px !important;
-    padding: 0 !important;
-    font-size: 1.3rem !important;
-    letter-spacing: 0 !important;
-    text-transform: none !important;
-    font-weight: 400 !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    background-clip: padding-box !important;
+    border-radius: 50%;
+    min-width: 50px; width: 50px; height: 50px;
+    padding: 0;
+    font-size: 1.3rem;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 400;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
 
-/* metric cards */
 div[data-testid="stMetric"] {{
-    background: {CARD} !important;
-    border-radius: 12px !important;
-    padding: 18px !important;
-    border: 1px solid rgba(255,255,255,0.2) !important;
+    background: {CARD};
+    border-radius: 12px;
+    padding: 18px;
+    border: 1px solid rgba(255,255,255,0.2);
 }}
-div[data-testid="stMetricValue"] {{ color: {FG} !important; font-size: 1.6rem !important; }}
-div[data-testid="stMetricLabel"] {{ color: {MUTED} !important; font-size: 0.78rem !important; }}
+div[data-testid="stMetricValue"] {{ color: {FG}; font-size: 1.6rem; }}
+div[data-testid="stMetricLabel"] {{ color: {MUTED}; font-size: 0.78rem; }}
 
-/* expanders — fix icon text artifact */
 .stExpander {{
-    background: {CARD} !important;
-    border: 1px solid rgba(255,255,255,0.18) !important;
-    border-radius: 10px !important;
-    overflow: hidden !important;
+    background: {CARD};
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 10px;
+    overflow: hidden;
 }}
-.stExpander summary {{
-    color: {FG} !important;
-}}
-/* hide the SVG arrow icon text that leaks through */
-.stExpander summary > div > div > p {{ color: {FG} !important; }}
-details > summary > span {{ display: none !important; }}
-details > summary > div {{ color: {FG} !important; }}
+.stExpander summary {{ color: {FG}; }}
+.stExpander summary > div > div > p {{ color: {FG}; }}
+details > summary > span {{ display: none; }}
+details > summary > div {{ color: {FG}; }}
 
-/* dataframe */
 div[data-testid="stDataFrame"] {{
-    border-radius: 10px !important;
-    border: 1px solid rgba(255,255,255,0.15) !important;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.15);
 }}
 
-/* toggle */
-div[data-testid="stToggle"] label span {{ color: {FG} !important; }}
+div[data-testid="stToggle"] label span {{ color: {FG}; }}
 
-/* download button */
 .stDownloadButton > button {{
-    background: transparent !important;
-    color: {ACC} !important;
-    border: 2px solid {ACC} !important;
-    border-radius: 30px !important;
-    padding: 10px 28px !important;
-    font-size: 0.82rem !important;
-    font-family: 'Sora', sans-serif !important;
-    font-weight: 600 !important;
-    letter-spacing: 1px !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    background-clip: padding-box !important;
+    background: transparent;
+    color: {ACC};
+    border: 2px solid {ACC};
+    border-radius: 30px;
+    padding: 10px 28px;
+    font-size: 0.82rem;
+    font-family: 'Sora', sans-serif;
+    font-weight: 600;
+    letter-spacing: 1px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
-.stDownloadButton > button:hover {{
-    background: {ACC} !important;
-    color: #111 !important;
-}}
+.stDownloadButton > button:hover {{ background: {ACC}; color: #111; }}
 
-hr {{ border-color: rgba(255,255,255,0.2) !important; }}
-code {{ background: rgba(0,0,0,0.3) !important; color: {ACC} !important;
-        border-radius: 6px !important; padding: 2px 8px !important; }}
+hr {{ border-color: rgba(255,255,255,0.2); }}
+code {{ background: rgba(0,0,0,0.3); color: {ACC}; border-radius: 6px; padding: 2px 8px; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ═══ ADMIN HEADER (shared) ════════════════════════════════════════════════════
+# ═══ ADMIN HEADER ═════════════════════════════════════════════════════════════
 def render_admin_header():
     c1, _, c3 = st.columns([4, 3, 2])
     with c1:
@@ -569,7 +504,6 @@ def render_admin_header():
 
 # ═══ STUDENT SURVEY ═══════════════════════════════════════════════════════════
 def page_student(token):
-    # toggle top-right
     _, tcol = st.columns([8, 2])
     with tcol:
         nd = st.toggle("🌙 Dark mode", value=DARK, key="dm_t")
@@ -577,20 +511,15 @@ def page_student(token):
             st.session_state.dark_mode = nd
             st.rerun()
 
-    db = get_conn()
-    link = db.execute("SELECT * FROM semester_links WHERE token=?", (token,)).fetchone()
+    data = load_data()
+    link = next((l for l in data["semester_links"] if l["token"] == token), None)
     if not link:
-        db.close()
         st.error("❌ Invalid or expired survey link.")
         return
 
-    subjects  = [r["name"] for r in db.execute(
-        "SELECT name FROM subjects WHERE active=1 ORDER BY name").fetchall()]
-    questions = db.execute(
-        "SELECT * FROM questions WHERE active=1 ORDER BY order_num").fetchall()
-    db.close()
+    subjects  = [s["name"] for s in sorted(data["subjects"], key=lambda x: x["name"]) if s["active"]]
+    questions = sorted([q for q in data["questions"] if q["active"]], key=lambda x: x["order_num"])
 
-    # success screen
     if st.session_state.submitted:
         _, cc, _ = st.columns([1, 3, 1])
         with cc:
@@ -598,89 +527,85 @@ def page_student(token):
             <div style="text-align:center;padding:100px 0">
                 <div style="font-size:3rem;margin-bottom:16px">🎉</div>
                 <div style="font-size:1.8rem;font-weight:700;color:{FG}">Thank you!</div>
-                <div style="font-size:0.9rem;color:{MUTED}">
-                    Your feedback has been recorded anonymously.
-                </div>
+                <div style="font-size:0.9rem;color:{MUTED}">Your feedback has been recorded anonymously.</div>
             </div>""", unsafe_allow_html=True)
-        _, bc, _ = st.columns([1,4,1])
+        _, bc, _ = st.columns([1, 4, 1])
         with bc:
             if st.button("Submit another response", use_container_width=True):
                 st.session_state.submitted = False
                 st.rerun()
         return
 
-    # header
     st.markdown(f"""
     <div style="text-align:center;padding:18px 0 28px">
         <div style="font-size:0.68rem;letter-spacing:3.5px;text-transform:uppercase;
-                    color:{MUTED};margin-bottom:10px;font-weight:600">
-            {link['label']}
-        </div>
-        <div style="font-size:2.2rem;font-weight:800;color:{FG};letter-spacing:-0.5px">
-            Course Feedback
-        </div>
-        <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">
-            🔒 All responses are 100% anonymous
-        </div>
+                    color:{MUTED};margin-bottom:10px;font-weight:600">{link['label']}</div>
+        <div style="font-size:2.2rem;font-weight:800;color:{FG};letter-spacing:-0.5px">Course Feedback</div>
+        <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">🔒 All responses are 100% anonymous</div>
     </div>""", unsafe_allow_html=True)
 
-    # form — centered column
-    _, col, _ = st.columns([1, 5, 1])
-    with col:
-        # card wrapper
-        st.markdown(
-            f'<div style="background:{CARD};border:1.5px solid rgba(255,215,0,0.25);'
-            f'border-radius:18px;padding:36px 42px">',
-            unsafe_allow_html=True)
+    with st.form("sf", clear_on_submit=False):
+        for i, q in enumerate(questions):
+            if i > 0:
+                st.markdown('<hr style="border:none;border-top:1px solid rgba(128,128,128,0.25);margin:20px 0">', unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="font-size:0.9rem;color:{FG};margin-bottom:12px;font-weight:400">'
+                f'{q["question_text"]}</div>', unsafe_allow_html=True)
 
-        with st.form("sf", clear_on_submit=True):
-            for i, q in enumerate(questions):
-                if i > 0:
-                    st.markdown(
-                        f'<hr style="border:none;border-top:1px solid rgba(128,128,128,0.25);margin:20px 0">',
-                        unsafe_allow_html=True)
-
-                st.markdown(
-                    f'<div style="font-size:0.9rem;color:{FG};margin-bottom:12px;font-weight:400">'
-                    f'{q["question_text"]}</div>',
-                    unsafe_allow_html=True)
-
-                qt, qid = q["question_type"], q["id"]
-
-                if qt == "dropdown":
-                    st.selectbox(" ", ["— Select a subject —"] + subjects,
-                                 label_visibility="collapsed", key=f"q{qid}")
-                elif qt == "text":
-                    st.text_input(" ", placeholder="Type your answer here…",
-                                  label_visibility="collapsed", key=f"q{qid}")
-                elif qt == "rating":
-                    st.radio(" ", [1, 2, 3, 4, 5], index=2, horizontal=True,
+            qt, qid = q["question_type"], q["id"]
+            if qt == "dropdown":
+                st.selectbox(" ", ["— Select a subject —"] + subjects,
                              label_visibility="collapsed", key=f"q{qid}")
-                elif qt == "yes_no":
-                    st.radio(" ", ["Yes", "No"], horizontal=True,
-                             label_visibility="collapsed", key=f"q{qid}")
+            elif qt == "text":
+                st.text_input(" ", placeholder="Type your answer here…",
+                              label_visibility="collapsed", key=f"q{qid}")
+            elif qt == "rating":
+                st.radio(" ", [1, 2, 3, 4, 5], index=None, horizontal=True,
+                         label_visibility="collapsed", key=f"q{qid}")
+            elif qt == "yes_no":
+                st.radio(" ", ["Yes", "No"], index=None, horizontal=True,
+                         label_visibility="collapsed", key=f"q{qid}")
 
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown('<div class="submit-btn">', unsafe_allow_html=True)
-            go = st.form_submit_button("SUBMIT", use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        go = st.form_submit_button("SUBMIT", use_container_width=True)
 
-            if go:
-                ans, subj = {}, None
-                for q in questions:
-                    v = st.session_state.get(f"q{q['id']}")
-                    ans[str(q["id"])] = str(v) if v is not None else ""
-                    if q["question_type"] == "dropdown" and v and v != "— Select a subject —":
-                        subj = v
-                db2 = get_conn()
-                db2.execute(
-                    "INSERT INTO responses(link_id, subject_name, answers_json) VALUES(?,?,?)",
-                    (link["id"], subj, json.dumps(ans)))
-                db2.commit(); db2.close()
+        if go:
+            ans, subj = {}, None
+            errors = []
+
+            for q in questions:
+                v = st.session_state.get(f"q{q['id']}")
+                ans[str(q["id"])] = str(v) if v is not None else ""
+
+                if q["question_type"] == "dropdown" and (not v or v == "— Select a subject —"):
+                    errors.append("Please select a subject.")
+                elif q["question_type"] == "text":
+                    if not (v and str(v).strip()):
+                        errors.append(f'"{q["question_text"]}" cannot be empty.')
+                    elif q.get("ai_moderated", 0):
+                        acceptable, reason = moderate_answer(q["question_text"], str(v).strip())
+                        if not acceptable:
+                            errors.append(f'"{q["question_text"]}": {reason}')
+                elif q["question_type"] in ("rating", "yes_no") and v is None:
+                    errors.append(f'Please answer: "{q["question_text"]}"')
+
+                if q["question_type"] == "dropdown" and v and v != "— Select a subject —":
+                    subj = v
+
+            if errors:
+                for e in errors:
+                    st.error(e)
+            else:
+                data2 = load_data()
+                rid = next_id(data2, "responses")
+                data2["responses"].append({
+                    "id": rid, "link_id": link["id"], "subject_name": subj,
+                    "answers_json": json.dumps(ans),
+                    "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                save_data(data2)
                 st.session_state.submitted = True
                 st.rerun()
-
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ═══ LANDING ══════════════════════════════════════════════════════════════════
@@ -702,14 +627,11 @@ def page_landing():
             </div>
         </div>""", unsafe_allow_html=True)
 
-        st.markdown('<div style="display:flex;justify-content:center">', unsafe_allow_html=True)
-        st.markdown('<div style="display:inline-block">', unsafe_allow_html=True)
         _, bc, _ = st.columns([2, 1, 2])
         with bc:
             if st.button("🔐 Admin Login"):
                 st.query_params["admin"] = "1"
                 st.rerun()
-        st.markdown("</div></div>", unsafe_allow_html=True)
 
         st.markdown(f"""
         <div style="text-align:center;margin-top:32px;font-size:0.85rem;color:{MUTED}">
@@ -730,11 +652,9 @@ def page_login():
             user = st.text_input("Username", placeholder="admin")
             pw   = st.text_input("Password", type="password", placeholder="••••••••")
             if st.form_submit_button("Sign In", use_container_width=True):
-                db = get_conn()
-                row = db.execute(
-                    "SELECT * FROM admins WHERE username=? AND password_hash=?",
-                    (user, hpw(pw))).fetchone()
-                db.close()
+                data = load_data()
+                row = next((a for a in data["admins"]
+                            if a["username"] == user and a["password_hash"] == hpw(pw)), None)
                 if row:
                     st.session_state.admin_logged_in = True
                     st.session_state.admin_user = user
@@ -765,7 +685,6 @@ def page_admin_home():
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Generate link section
         st.markdown(f"""
         <div style="text-align:center;margin:36px 0 4px">
             <div style="font-size:1.15rem;font-weight:700;color:white">Generate new survey link</div>
@@ -783,11 +702,14 @@ def page_admin_home():
             st.markdown('<div class="arrow-btn">', unsafe_allow_html=True)
             if st.button("→", key="gen_btn"):
                 if sem_in and sem_in.strip():
+                    data = load_data()
                     tok = uuid.uuid4().hex[:8].upper()
-                    db = get_conn()
-                    db.execute("INSERT INTO semester_links(label,token) VALUES(?,?)",
-                               (sem_in.strip(), tok))
-                    db.commit(); db.close()
+                    lid = next_id(data, "semester_links")
+                    data["semester_links"].append({
+                        "id": lid, "label": sem_in.strip(), "token": tok,
+                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    save_data(data)
                     st.session_state.gen_token = tok
                     st.rerun()
                 else:
@@ -795,10 +717,8 @@ def page_admin_home():
             st.markdown("</div>", unsafe_allow_html=True)
 
         if st.session_state.gen_token:
-            db = get_conn()
-            lr = db.execute("SELECT label FROM semester_links WHERE token=?",
-                            (st.session_state.gen_token,)).fetchone()
-            db.close()
+            data = load_data()
+            lr = next((l for l in data["semester_links"] if l["token"] == st.session_state.gen_token), None)
             tok = st.session_state.gen_token
             lbl = lr["label"] if lr else "?"
             st.markdown(f"""
@@ -807,35 +727,32 @@ def page_admin_home():
                 <div style="font-size:0.76rem;color:{ACC};font-weight:600;margin-bottom:8px">
                     ✓ Link generated for <strong>{lbl}</strong>
                 </div>
-                <div style="font-size:0.8rem;color:rgba(255,255,255,0.7)">
-                    Share this URL with students:
-                </div>
+                <div style="font-size:0.8rem;color:rgba(255,255,255,0.7)">Share this URL with students:</div>
             </div>""", unsafe_allow_html=True)
             st.code(f"?token={tok}")
 
-    # recent links
     st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
-    db = get_conn()
-    recent = db.execute(
-        "SELECT sl.*, COUNT(r.id) as rc FROM semester_links sl "
-        "LEFT JOIN responses r ON r.link_id=sl.id GROUP BY sl.id ORDER BY sl.created_at DESC LIMIT 6"
-    ).fetchall()
-    db.close()
+    data = load_data()
+    resp_counts = {}
+    for r in data["responses"]:
+        resp_counts[r["link_id"]] = resp_counts.get(r["link_id"], 0) + 1
+    recent = sorted(data["semester_links"], key=lambda x: x["created_at"], reverse=True)[:6]
 
     if recent:
-        st.markdown(f'<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Recent survey links</div>',
+        st.markdown('<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Recent survey links</div>',
                     unsafe_allow_html=True)
         for i in range(0, len(recent), 2):
             cols = st.columns(2)
             for j, row in enumerate(recent[i:i+2]):
                 with cols[j]:
+                    rc = resp_counts.get(row["id"], 0)
                     st.markdown(f"""
                     <div style="background:rgba(255,255,255,0.12);border-radius:12px;
                                 padding:16px 20px;margin-bottom:10px;
                                 border:1px solid rgba(255,255,255,0.18)">
                         <div style="font-weight:700;font-size:1rem;color:white">{row['label']}</div>
                         <div style="font-size:0.78rem;color:rgba(255,255,255,0.55);margin-top:6px">
-                            {row['rc']} response(s) &nbsp;·&nbsp; token:
+                            {rc} response(s) &nbsp;·&nbsp; token:
                             <code style="font-size:0.75rem">{row['token']}</code>
                         </div>
                     </div>""", unsafe_allow_html=True)
@@ -856,18 +773,16 @@ def page_admin_results():
         st.rerun()
     st.markdown("</div><br>", unsafe_allow_html=True)
 
-    # Sort controls — vertical stacks
     sc1, _, sc2 = st.columns([2, 1, 2])
     with sc1:
-        st.markdown(f'<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Sort by</div>',
+        st.markdown('<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Sort by</div>',
                     unsafe_allow_html=True)
         sort_v = st.radio("_sb", ["Year and Semester", "Subjects"],
                           index=0 if st.session_state.sort_by == "semester" else 1,
                           key="sort_radio", label_visibility="hidden")
         st.session_state.sort_by = "semester" if "Semester" in sort_v else "subject"
-
     with sc2:
-        st.markdown(f'<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>',
+        st.markdown('<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>',
                     unsafe_allow_html=True)
         ord_v = st.radio("_ob", ["Ascending", "Descending"],
                          index=0 if st.session_state.sort_order == "asc" else 1,
@@ -875,16 +790,14 @@ def page_admin_results():
         st.session_state.sort_order = "asc" if ord_v == "Ascending" else "desc"
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    db = get_conn()
-    ORDER = "ASC" if st.session_state.sort_order == "asc" else "DESC"
+    data = load_data()
+    desc = (st.session_state.sort_order == "desc")
 
     if st.session_state.sort_by == "semester":
-        rows = db.execute(
-            f"SELECT sl.*, COUNT(r.id) as cnt FROM semester_links sl "
-            f"LEFT JOIN responses r ON r.link_id=sl.id GROUP BY sl.id ORDER BY sl.label {ORDER}"
-        ).fetchall()
-        db.close()
+        resp_counts = {}
+        for r in data["responses"]:
+            resp_counts[r["link_id"]] = resp_counts.get(r["link_id"], 0) + 1
+        rows = sorted(data["semester_links"], key=lambda x: x["label"], reverse=desc)
         if not rows:
             st.info("No survey links yet. Generate one from Admin home.")
             return
@@ -893,19 +806,20 @@ def page_admin_results():
             for j, row in enumerate(rows[i:i+2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
-                    lbl = f"{row['label'].upper()}  ({row['cnt']} RESPONSES)"
+                    cnt = resp_counts.get(row["id"], 0)
+                    lbl = f"{row['label'].upper()}  ({cnt} RESPONSES)"
                     if st.button(lbl, key=f"s_{row['id']}", use_container_width=True):
                         st.session_state.drill_link_id = row["id"]
                         st.session_state.admin_view = "detail_semester"
                         st.rerun()
                     st.markdown("</div>", unsafe_allow_html=True)
     else:
-        rows = db.execute(
-            f"SELECT subject_name, COUNT(*) as cnt FROM responses "
-            f"WHERE subject_name IS NOT NULL AND subject_name!='' "
-            f"GROUP BY subject_name ORDER BY subject_name {ORDER}"
-        ).fetchall()
-        db.close()
+        subj_counts = {}
+        for r in data["responses"]:
+            if r.get("subject_name"):
+                subj_counts[r["subject_name"]] = subj_counts.get(r["subject_name"], 0) + 1
+        rows = sorted([{"subject_name": k, "cnt": v} for k, v in subj_counts.items()],
+                      key=lambda x: x["subject_name"], reverse=desc)
         if not rows:
             st.info("No responses with subject data yet.")
             return
@@ -927,12 +841,11 @@ def page_admin_detail_semester():
     render_admin_header()
 
     link_id = st.session_state.drill_link_id
-    db = get_conn()
-    link      = db.execute("SELECT * FROM semester_links WHERE id=?", (link_id,)).fetchone()
-    responses = db.execute(
-        "SELECT * FROM responses WHERE link_id=? ORDER BY submitted_at DESC", (link_id,)).fetchall()
-    questions = db.execute("SELECT * FROM questions ORDER BY order_num").fetchall()
-    db.close()
+    data = load_data()
+    link      = next((l for l in data["semester_links"] if l["id"] == link_id), None)
+    responses = sorted([r for r in data["responses"] if r["link_id"] == link_id],
+                       key=lambda x: x["submitted_at"], reverse=True)
+    questions = sorted(data["questions"], key=lambda x: x["order_num"])
 
     if not link:
         st.error("Semester not found."); return
@@ -948,7 +861,6 @@ def page_admin_detail_semester():
         st.rerun()
     st.markdown("</div><br>", unsafe_allow_html=True)
 
-    # metrics
     rating_qs = [q for q in questions if q["question_type"] == "rating"]
     all_r = []
     for r in responses:
@@ -962,25 +874,23 @@ def page_admin_detail_semester():
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Responses", len(responses))
     c2.metric("Avg Rating", f"{sum(all_r)/len(all_r):.1f}/5" if all_r else "N/A")
-    unique_s = len(set(r["subject_name"] for r in responses if r["subject_name"]))
+    unique_s = len(set(r["subject_name"] for r in responses if r.get("subject_name")))
     c3.metric("Subjects", unique_s)
 
     if not responses:
         st.info("No responses yet."); return
 
-    # chart
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown(f'<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">Responses by subject</div>',
+    st.markdown('<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">Responses by subject</div>',
                 unsafe_allow_html=True)
     sc = {}
     for r in responses:
-        s = r["subject_name"] or "Not specified"
+        s = r.get("subject_name") or "Not specified"
         sc[s] = sc.get(s, 0) + 1
     if sc:
         df_sc = pd.DataFrame(sc.items(), columns=["Subject","Count"]).sort_values("Count", ascending=False)
         st.bar_chart(df_sc.set_index("Subject"))
 
-    # individual responses
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
     st.markdown(f'<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">{len(responses)} Individual Responses</div>',
                 unsafe_allow_html=True)
@@ -988,8 +898,8 @@ def page_admin_detail_semester():
     for i, r in enumerate(responses):
         try: ans = json.loads(r["answers_json"])
         except: ans = {}
-        subj = r["subject_name"] or "Unknown"
-        date = r["submitted_at"][:10] if r["submitted_at"] else "—"
+        subj = r.get("subject_name") or "Unknown"
+        date = r["submitted_at"][:10] if r.get("submitted_at") else "—"
         with st.expander(f"Response #{i+1} — {subj} — {date}"):
             for q in questions:
                 val = ans.get(str(q["id"]), "—")
@@ -1002,11 +912,10 @@ def page_admin_detail_semester():
                     <div style="font-size:0.92rem;color:white">{val} {stars}</div>
                 </div>""", unsafe_allow_html=True)
 
-    # export
     st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
     rows_exp = []
     for r in responses:
-        rd = {"Semester": link["label"], "Subject": r["subject_name"], "Date": r["submitted_at"]}
+        rd = {"Semester": link["label"], "Subject": r.get("subject_name"), "Date": r.get("submitted_at")}
         try:
             ans = json.loads(r["answers_json"])
             for q in questions:
@@ -1023,14 +932,13 @@ def page_admin_detail_subject():
     render_admin_header()
 
     subj = st.session_state.drill_subject
-    db = get_conn()
-    responses = db.execute(
-        """SELECT r.*, sl.label as sem_label FROM responses r
-           JOIN semester_links sl ON r.link_id=sl.id
-           WHERE r.subject_name=? ORDER BY r.submitted_at DESC""",
-        (subj,)).fetchall()
-    questions = db.execute("SELECT * FROM questions ORDER BY order_num").fetchall()
-    db.close()
+    data = load_data()
+    link_map  = {l["id"]: l["label"] for l in data["semester_links"]}
+    responses = sorted([r for r in data["responses"] if r.get("subject_name") == subj],
+                       key=lambda x: x["submitted_at"], reverse=True)
+    for r in responses:
+        r["sem_label"] = link_map.get(r["link_id"], "Unknown")
+    questions = sorted(data["questions"], key=lambda x: x["order_num"])
 
     st.markdown(f"""
     <div style="text-align:center;font-size:2rem;font-weight:800;color:white;margin:0 0 24px">
@@ -1093,19 +1001,18 @@ def page_admin_edit():
         st.rerun()
     st.markdown("</div><br>", unsafe_allow_html=True)
 
-    db = get_conn()
-    questions = db.execute(
-        "SELECT * FROM questions WHERE active=1 ORDER BY order_num").fetchall()
-    db.close()
+    data = load_data()
+    questions = sorted([q for q in data["questions"] if q["active"]], key=lambda x: x["order_num"])
+    subjects  = sorted([s for s in data["subjects"] if s["active"]], key=lambda x: x["name"])
 
     TYPE_OPTS   = ["dropdown","text","rating","yes_no"]
     TYPE_LABELS = ["Dropdown ▼","Text","Rating (1-5)","Yes / No"]
     TYPE_MAP    = dict(zip(TYPE_OPTS, TYPE_LABELS))
     TYPE_REV    = dict(zip(TYPE_LABELS, TYPE_OPTS))
 
-    # header row
-    h0, h1, h2, h3 = st.columns([0.5, 4.5, 2.5, 1.2])
-    for txt, col in [("No.", h0), ("Question", h1), ("Type", h2), ("Remove", h3)]:
+    # Header row — extra column for AI toggle
+    h0, h1, h2, h3, h4 = st.columns([0.5, 4, 2, 1.5, 1.2])
+    for txt, col in [("No.", h0), ("Question", h1), ("Type", h2), ("AI Check", h3), ("Remove", h4)]:
         col.markdown(
             f'<div style="font-size:0.78rem;font-weight:700;color:rgba(255,255,255,0.55);'
             f'padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.2)">{txt}</div>',
@@ -1114,7 +1021,7 @@ def page_admin_edit():
     st.markdown("")
 
     for i, q in enumerate(questions):
-        c0, c1, c2, c3 = st.columns([0.5, 4.5, 2.5, 1.2])
+        c0, c1, c2, c3, c4 = st.columns([0.5, 4, 2, 1.5, 1.2])
         with c0:
             st.markdown(
                 f'<div style="padding:14px 0;font-size:0.9rem;color:rgba(255,255,255,0.7)">{i+1}</div>',
@@ -1128,37 +1035,48 @@ def page_admin_edit():
             st.selectbox("_", TYPE_LABELS, index=idx,
                          label_visibility="collapsed", key=f"qtp_{q['id']}")
         with c3:
+            if q["question_type"] == "text":
+                st.toggle("🤖", value=bool(q.get("ai_moderated", 0)),
+                          key=f"qai_{q['id']}", help="Enable AI moderation for this answer")
+            else:
+                st.markdown('<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
+                            unsafe_allow_html=True)
+        with c4:
             st.markdown('<div class="rem-btn">', unsafe_allow_html=True)
             if st.button("−", key=f"rm_{q['id']}"):
-                db2 = get_conn()
-                db2.execute("UPDATE questions SET active=0 WHERE id=?", (q["id"],))
-                db2.commit(); db2.close()
+                d = load_data()
+                for qq in d["questions"]:
+                    if qq["id"] == q["id"]: qq["active"] = 0
+                save_data(d)
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # save all
     st.markdown("<br>", unsafe_allow_html=True)
-    _, sc, _ = st.columns([1,2,1])
+    _, sc, _ = st.columns([1, 2, 1])
     with sc:
         st.markdown('<div class="save-btn">', unsafe_allow_html=True)
         if st.button("💾 SAVE ALL CHANGES", use_container_width=True, key="save_all"):
-            db2 = get_conn()
-            for q in questions:
-                nt  = st.session_state.get(f"qt_{q['id']}", q["question_text"])
-                nl  = st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"]))
-                ntp = TYPE_REV.get(nl, q["question_type"])
-                db2.execute("UPDATE questions SET question_text=?, question_type=? WHERE id=?",
-                            (nt, ntp, q["id"]))
-            db2.commit(); db2.close()
+            d = load_data()
+            for q in d["questions"]:
+                if not q["active"]: continue
+                nt = st.session_state.get(f"qt_{q['id']}", q["question_text"])
+                nl = st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"]))
+                q["question_text"] = nt
+                q["question_type"] = TYPE_REV.get(nl, q["question_type"])
+                if q["question_type"] == "text":
+                    q["ai_moderated"] = 1 if st.session_state.get(f"qai_{q['id']}", False) else 0
+                else:
+                    q["ai_moderated"] = 0
+            save_data(d)
             st.success("Saved!")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # add new question
+    # Add new question
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown(f'<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:10px">Add new question</div>',
+    st.markdown('<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:10px">Add new question</div>',
                 unsafe_allow_html=True)
 
-    na0, na1, na2, na3 = st.columns([0.5, 4.5, 2.5, 1.2])
+    na0, na1, na2, na3, na4 = st.columns([0.5, 4, 2, 1.5, 1.2])
     with na0:
         st.markdown(
             f'<div style="padding:14px 0;font-size:0.9rem;color:rgba(255,255,255,0.35)">{len(questions)+1}</div>',
@@ -1170,28 +1088,37 @@ def page_admin_edit():
         nq_type_lbl = st.selectbox("_", TYPE_LABELS,
                                    label_visibility="collapsed", key="nq_type")
     with na3:
+        if nq_type_lbl == "Text":
+            nq_ai = st.toggle("🤖", value=False, key="nq_ai",
+                              help="Enable AI moderation for this answer")
+        else:
+            nq_ai = False
+            st.markdown('<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
+                        unsafe_allow_html=True)
+    with na4:
         st.markdown('<div class="add-btn">', unsafe_allow_html=True)
         if st.button("＋", key="add_q"):
             if nq_text.strip():
+                d = load_data()
+                mo = max((q["order_num"] for q in d["questions"]), default=0)
+                qid = next_id(d, "questions")
                 ntp = TYPE_REV.get(nq_type_lbl, "text")
-                db2 = get_conn()
-                mo = db2.execute("SELECT MAX(order_num) FROM questions").fetchone()[0] or 0
-                db2.execute("INSERT INTO questions(question_text,question_type,order_num) VALUES(?,?,?)",
-                            (nq_text.strip(), ntp, mo + 1))
-                db2.commit(); db2.close()
+                d["questions"].append({
+                    "id": qid, "question_text": nq_text.strip(),
+                    "question_type": ntp,
+                    "order_num": mo + 1, "active": 1,
+                    "ai_moderated": 1 if (ntp == "text" and nq_ai) else 0
+                })
+                save_data(d)
                 st.rerun()
             else:
                 st.warning("Enter question text.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # subjects section
+    # Subjects section
     st.markdown('<hr style="margin:28px 0">', unsafe_allow_html=True)
-    st.markdown(f'<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Subjects (for Dropdown question)</div>',
+    st.markdown('<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Subjects (for Dropdown question)</div>',
                 unsafe_allow_html=True)
-
-    db = get_conn()
-    subjects = db.execute("SELECT * FROM subjects WHERE active=1 ORDER BY name").fetchall()
-    db.close()
 
     for subj in subjects:
         s1, s2 = st.columns([7, 1.5])
@@ -1202,9 +1129,10 @@ def page_admin_edit():
         with s2:
             st.markdown('<div class="rem-btn">', unsafe_allow_html=True)
             if st.button("−", key=f"rs_{subj['id']}"):
-                db2 = get_conn()
-                db2.execute("UPDATE subjects SET active=0 WHERE id=?", (subj["id"],))
-                db2.commit(); db2.close()
+                d = load_data()
+                for s in d["subjects"]:
+                    if s["id"] == subj["id"]: s["active"] = 0
+                save_data(d)
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1216,10 +1144,14 @@ def page_admin_edit():
         st.markdown('<div class="add-btn">', unsafe_allow_html=True)
         if st.button("＋", key="add_s"):
             if ns.strip():
-                db2 = get_conn()
-                db2.execute("INSERT OR IGNORE INTO subjects(name) VALUES(?)", (ns.strip(),))
-                db2.execute("UPDATE subjects SET active=1 WHERE name=?", (ns.strip(),))
-                db2.commit(); db2.close()
+                d = load_data()
+                existing = next((s for s in d["subjects"] if s["name"] == ns.strip()), None)
+                if existing:
+                    existing["active"] = 1
+                else:
+                    sid = next_id(d, "subjects")
+                    d["subjects"].append({"id": sid, "name": ns.strip(), "active": 1})
+                save_data(d)
                 st.rerun()
             else:
                 st.warning("Enter a subject name.")
