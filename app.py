@@ -97,7 +97,6 @@ def ensure_defaults():
         ])
         db.counters.update_one({"_id": "questions"}, {"$set": {"seq": 4}}, upsert=True)
 
-ensure_defaults()
 
 PROJ = {"_id": 0}  # exclude MongoDB _id from all queries
 
@@ -125,6 +124,8 @@ for k, v in {
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+ensure_defaults()
 
 def hpw(p): return hashlib.sha256(p.encode()).hexdigest()
 
