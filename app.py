@@ -5,7 +5,52 @@ import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
-import urllib.request
+import time
+from google import genai
+
+GEMINI_MODEL = "gemini-2.0-flash"
+
+_gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+def moderate_answer(question_text, answer_text):
+    """Returns (is_acceptable, reason, tip) using Gemini."""
+    prompt = f"""You are moderating a student course feedback survey.
+
+Question: "{question_text}"
+Student's answer: "{answer_text}"
+
+Determine if this answer is genuine, constructive, and relevant (not gibberish or spam).
+Also check it's at least somewhat detailed.
+
+Respond ONLY with a JSON object like:
+{{"acceptable": true}}
+or
+{{"acceptable": false, "reason": "brief explanation for the student", "tip": "specific suggestion to improve their answer"}}"""
+
+    try:
+        response = _gemini_client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt
+        )
+        text = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(text)
+        if parsed.get("acceptable", True):
+            return True, None, None
+        else:
+            return False, parsed.get("reason", "Please provide a more constructive answer."), parsed.get("tip", "")
+    except Exception:
+        return True, None, None  # Fail open if API is unreachable
+
+def check_llm_status():
+    """Returns (is_online, response_time_ms, message)."""
+    try:
+        start = time.time()
+        response = _gemini_client.models.generate_content(
+            model=GEMINI_MODEL, contents="Reply with only the word: OK"
+        )
+        elapsed = int((time.time() - start) * 1000)
+        return True, elapsed, response.text.strip()
+    except Exception as e:
+        return False, None, str(e)
 
 st.set_page_config(
     page_title="CourseVoice",
@@ -27,6 +72,7 @@ for k, v in {
     "drill_subject": None,
     "gen_token": None,
     "submitted": False,
+    "form_errors": [],
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -65,40 +111,6 @@ def next_id(data, table):
     nid = data["_next_ids"].get(table, 1)
     data["_next_ids"][table] = nid + 1
     return nid
-
-def moderate_answer(question_text, answer_text):
-    """Returns (is_acceptable, feedback_message) using Gemini."""
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyB01jvEgsqQMg3Y2vo0b-0aE0CUTd3x6CQ"
-    prompt = f"""You are moderating a student course feedback survey.
-
-Question: "{question_text}"
-Student's answer: "{answer_text}"
-
-Determine if this answer:
-1. Actually attempts to answer the question
-2. Is constructive (not gibberish, spam, or purely offensive)
-
-Respond with ONLY a JSON object like:
-{{"acceptable": true}}
-or
-{{"acceptable": false, "reason": "brief explanation for the student"}}"""
-
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}]
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            result = json.loads(resp.read())
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            parsed = json.loads(text)
-            if parsed.get("acceptable", True):
-                return True, None
-            else:
-                return False, parsed.get("reason", "Please provide a more constructive answer.")
-    except Exception:
-        return True, None  # Fail open if API is unreachable
 
 TOKEN       = st.query_params.get("token", None)
 ADMIN_PARAM = st.query_params.get("admin", None)
@@ -544,6 +556,29 @@ def page_student(token):
         <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">🔒 All responses are 100% anonymous</div>
     </div>""", unsafe_allow_html=True)
 
+    # ── Display styled errors from previous submission attempt (outside the form) ──
+    if st.session_state.form_errors:
+        for e in st.session_state.form_errors:
+            if isinstance(e, dict):
+                st.markdown(
+                    f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;'
+                    f'padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">'
+                    f'⚠️ {e["msg"]}</div>',
+                    unsafe_allow_html=True)
+                if e.get("tip"):
+                    st.markdown(
+                        f'<div style="background:#1a2f4a;border:1px solid #3a7bd5;border-radius:8px;'
+                        f'padding:12px 16px;margin:4px 0 8px;color:#7eb8f7;font-size:0.88rem">'
+                        f'💡 Tip: {e["tip"]}</div>',
+                        unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;'
+                    f'padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">'
+                    f'⚠️ {e}</div>',
+                    unsafe_allow_html=True)
+        st.session_state.form_errors = []
+
     with st.form("sf", clear_on_submit=False):
         for i, q in enumerate(questions):
             if i > 0:
@@ -557,8 +592,15 @@ def page_student(token):
                 st.selectbox(" ", ["— Select a subject —"] + subjects,
                              label_visibility="collapsed", key=f"q{qid}")
             elif qt == "text":
-                st.text_input(" ", placeholder="Type your answer here…",
-                              label_visibility="collapsed", key=f"q{qid}")
+                val = st.text_input(" ", placeholder="Type your answer here…",
+                                    label_visibility="collapsed", key=f"q{qid}")
+                # Character counter
+                char_count = len(val) if val else 0
+                counter_color = "#e74c3c" if char_count < 50 else "#27ae60"
+                st.markdown(
+                    f'<div style="text-align:right;font-size:0.75rem;color:{counter_color};'
+                    f'margin-top:4px">{char_count} chars (aim for 50+)</div>',
+                    unsafe_allow_html=True)
             elif qt == "rating":
                 st.radio(" ", [1, 2, 3, 4, 5], index=None, horizontal=True,
                          label_visibility="collapsed", key=f"q{qid}")
@@ -583,9 +625,10 @@ def page_student(token):
                     if not (v and str(v).strip()):
                         errors.append(f'"{q["question_text"]}" cannot be empty.')
                     elif q.get("ai_moderated", 0):
-                        acceptable, reason = moderate_answer(q["question_text"], str(v).strip())
+                        with st.spinner("Checking your answer…"):
+                            acceptable, reason, tip = moderate_answer(q["question_text"], str(v).strip())
                         if not acceptable:
-                            errors.append(f'"{q["question_text"]}": {reason}')
+                            errors.append({"msg": f'Please revise your answer: {reason}', "tip": tip})
                 elif q["question_type"] in ("rating", "yes_no") and v is None:
                     errors.append(f'Please answer: "{q["question_text"]}"')
 
@@ -593,8 +636,8 @@ def page_student(token):
                     subj = v
 
             if errors:
-                for e in errors:
-                    st.error(e)
+                st.session_state.form_errors = errors
+                st.rerun()
             else:
                 data2 = load_data()
                 rid = next_id(data2, "responses")
@@ -685,8 +728,46 @@ def page_admin_home():
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # ── LLM Status Check ──────────────────────────────────────────────────
+        st.markdown('<hr style="margin:28px 0 20px">', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
+            '🤖 AI Moderation Status</div>',
+            unsafe_allow_html=True)
+
+        llm_col1, llm_col2, llm_col3 = st.columns([1, 2, 1])
+        with llm_col2:
+            if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
+                with st.spinner("Pinging Gemini…"):
+                    online, ms, msg = check_llm_status()
+                st.session_state["llm_status"] = {"online": online, "ms": ms, "msg": msg}
+
+        status = st.session_state.get("llm_status")
+        if status is not None:
+            if status["online"]:
+                st.markdown(
+                    f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
+                    f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                    f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
+                    f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
+                    f'Responded in <strong style="color:white">{status["ms"]} ms</strong>'
+                    f' &nbsp;·&nbsp; Reply: <code>{status["msg"]}</code></div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
+                    f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                    f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
+                    f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
+                    f'{status["msg"]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+
+        st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
+
         st.markdown(f"""
-        <div style="text-align:center;margin:36px 0 4px">
+        <div style="text-align:center;margin:0 0 4px">
             <div style="font-size:1.15rem;font-weight:700;color:white">Generate new survey link</div>
             <div style="font-size:0.74rem;color:rgba(255,255,255,0.5);margin-top:6px">
                 Note: editing questions does not affect already-generated links
@@ -1010,7 +1091,6 @@ def page_admin_edit():
     TYPE_MAP    = dict(zip(TYPE_OPTS, TYPE_LABELS))
     TYPE_REV    = dict(zip(TYPE_LABELS, TYPE_OPTS))
 
-    # Header row — extra column for AI toggle
     h0, h1, h2, h3, h4 = st.columns([0.5, 4, 2, 1.5, 1.2])
     for txt, col in [("No.", h0), ("Question", h1), ("Type", h2), ("AI Check", h3), ("Remove", h4)]:
         col.markdown(
@@ -1071,7 +1151,6 @@ def page_admin_edit():
             st.success("Saved!")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Add new question
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
     st.markdown('<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:10px">Add new question</div>',
                 unsafe_allow_html=True)
@@ -1115,7 +1194,6 @@ def page_admin_edit():
                 st.warning("Enter question text.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Subjects section
     st.markdown('<hr style="margin:28px 0">', unsafe_allow_html=True)
     st.markdown('<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Subjects (for Dropdown question)</div>',
                 unsafe_allow_html=True)
