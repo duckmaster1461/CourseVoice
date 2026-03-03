@@ -53,7 +53,7 @@ def check_llm_status():
 # ═══ MONGODB ══════════════════════════════════════════════════════════════════
 @st.cache_resource
 def init_connection():
-    return pymongo.MongoClient(**st.secrets["mongo"])
+    return pymongo.MongoClient(st.secrets["mongo"]["uri"])
 
 def get_db():
     return init_connection()["coursevoice"]
