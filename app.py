@@ -729,7 +729,7 @@ def page_admin_home():
                 </div>
                 <div style="font-size:0.8rem;color:rgba(255,255,255,0.7)">Share this URL with students:</div>
             </div>""", unsafe_allow_html=True)
-            st.code(f"?token={tok}")
+            st.code(f"https://sxptkiopucmjsnzgpv4ekh.streamlit.app/?token={tok}")
 
     st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
     data = load_data()
