@@ -53,7 +53,13 @@ def check_llm_status():
 # ═══ MONGODB ══════════════════════════════════════════════════════════════════
 @st.cache_resource
 def init_connection():
-    return pymongo.MongoClient(st.secrets["mongo"]["uri"])
+    return pymongo.MongoClient(
+        st.secrets["mongo"]["uri"],
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+        tls=True,
+        tlsAllowInvalidCertificates=False,
+    )
 
 def get_db():
     return init_connection()["coursevoice"]
@@ -125,7 +131,7 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-ensure_defaults()
+# ensure_defaults runs once per session via session_state guard (see router)
 
 def hpw(p): return hashlib.sha256(p.encode()).hexdigest()
 
@@ -1247,6 +1253,11 @@ def page_admin():
 
 
 # ═══ ROUTER ═══════════════════════════════════════════════════════════════════
+# Seed DB once per session — runs after Streamlit is fully initialised
+if not st.session_state.get("_db_ready"):
+    ensure_defaults()
+    st.session_state["_db_ready"] = True
+
 if TOKEN:
     page_student(TOKEN)
 elif ADMIN_PARAM is not None or st.session_state.admin_logged_in:
