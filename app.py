@@ -227,17 +227,18 @@ h1,h2,h3,h4,h5,h6 {{ color: {FG}; }}
 div[data-baseweb="popover"],
 div[data-baseweb="popover"] ul,
 div[data-baseweb="popover"] li {{
-    background: #ffffff !important;
-    color: #1a1a1a !important;
+    background: {INP} !important;
+    color: {FG} !important;
 }}
 div[data-baseweb="popover"] li:hover {{
-    background: #f0f0f0 !important;
+    background: {BDR} !important;
+    color: #111 !important;
 }}
-
 div[data-baseweb="popover"] li[aria-selected="true"] {{
     background: {ACC} !important;
     color: #111 !important;
 }}
+
 div[data-testid="stRadio"] > label {{ display: none; }}
 div[data-testid="stRadio"] [data-testid="stWidgetLabel"] {{
     display: none; height: 0; margin: 0; padding: 0; min-height: 0;
