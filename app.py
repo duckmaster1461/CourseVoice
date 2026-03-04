@@ -608,13 +608,6 @@ def page_student(token):
             elif qt == "text":
                 val = st.text_input(" ", placeholder="Type your answer here…",
                                     label_visibility="collapsed", key=f"q{qid}")
-                # Character counter
-                char_count = len(val) if val else 0
-                counter_color = "#e74c3c" if char_count < 50 else "#27ae60"
-                st.markdown(
-                    f'<div style="text-align:right;font-size:0.75rem;color:{counter_color};'
-                    f'margin-top:4px">{char_count} chars (aim for 50+)</div>',
-                    unsafe_allow_html=True)
             elif qt == "rating":
                 st.radio(" ", [1, 2, 3, 4, 5], index=None, horizontal=True,
                          label_visibility="collapsed", key=f"q{qid}")
