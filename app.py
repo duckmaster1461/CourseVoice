@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 from google import genai
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 _gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
