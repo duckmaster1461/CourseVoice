@@ -8,6 +8,8 @@ from pathlib import Path
 import time
 from google import genai
 
+DATA_PATH = Path("coursevoice.json")
+
 # ============================================================================
 # OPTIONAL MONGODB IMPORTS
 # Supports both:
