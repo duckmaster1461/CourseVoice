@@ -11,10 +11,8 @@ from google import genai
 DATA_PATH = Path("coursevoice.json")
 
 # ============================================================================
-# OPTIONAL MONGODB IMPORTS
-# Supports both:
-# 1) db.mongo / db.db_collections / db.init_db
-# 2) mongo / db_collections / init_db
+# MONGODB IMPORTS
+# Package layout: db/mongo.py, db/db_collections.py, db/init_db.py
 # ============================================================================
 
 MONGO_IMPORT_OK = False
@@ -32,26 +30,10 @@ try:
     )
     from db.init_db import init_db
     MONGO_IMPORT_OK = True
-except Exception as e1:
-    try:
-        from mongo import get_database
-        from db_collections import (
-            admins_col,
-            subjects_col,
-            questions_col,
-            semester_links_col,
-            responses_col,
-            counters_col,
-        )
-        from init_db import init_db
-        MONGO_IMPORT_OK = True
-    except Exception as e2:
-        MONGO_IMPORT_OK = False
-        MONGO_IMPORT_ERROR = (
-            f"Primary import failed: {type(e1).__name__}: {e1} | "
-            f"Fallback import failed: {type(e2).__name__}: {e2}"
-        )
-
+except Exception as e:
+    MONGO_IMPORT_OK = False
+    MONGO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+    
 # ============================================================================
 # GEMINI
 # ============================================================================
