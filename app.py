@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import time
-from google import genai
+import google.generativeai as genai
 
 # ============================================================================
 # OPTIONAL MONGODB IMPORTS
@@ -50,8 +50,7 @@ except Exception:
 # ============================================================================
 
 GEMINI_MODEL = "gemini-3-flash-preview"
-_gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 def moderate_answer(question_text, answer_text):
     """Returns (is_acceptable, reason, tip) using Gemini."""
@@ -69,10 +68,7 @@ or
 {{"acceptable": false, "reason": "brief explanation for the student", "tip": "specific suggestion to improve their answer"}}"""
 
     try:
-        response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
+        response = genai.GenerativeModel(GEMINI_MODEL).generate_content(prompt)
         text = (
             response.text.strip()
             .removeprefix("```json")
