@@ -1,4 +1,4 @@
-from db.collections import questions_col, counters_col
+from db.db_collections import questions_col, counters_col
 from pymongo import ReturnDocument
 
 def get_next_id(counter_name):

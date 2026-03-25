@@ -1,5 +1,5 @@
 import hashlib
-from db.collections import (
+from db.db_collections import (
     admins_col, subjects_col, questions_col, counters_col
 )
 

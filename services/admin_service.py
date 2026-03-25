@@ -1,4 +1,4 @@
-from db.collections import admins_col
+from db.db_collections import admins_col
 from utils.security import hpw
 
 def find_admin(username, password):

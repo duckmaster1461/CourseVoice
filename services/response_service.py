@@ -1,4 +1,4 @@
-from db.collections import responses_col, counters_col
+from db.db_collections import responses_col, counters_col
 from pymongo import ReturnDocument
 from datetime import datetime
 

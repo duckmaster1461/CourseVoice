@@ -8,9 +8,50 @@ from pathlib import Path
 import time
 from google import genai
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+# ============================================================================
+# OPTIONAL MONGODB IMPORTS
+# Supports both:
+# 1) db.mongo / db.collections / db.init_db
+# 2) mongo / collections / init_db
+# ============================================================================
 
+MONGO_IMPORT_OK = False
+
+try:
+    from db.mongo import get_database
+    from db.db_collections import (
+        admins_col,
+        subjects_col,
+        questions_col,
+        semester_links_col,
+        responses_col,
+        counters_col,
+    )
+    from db.init_db import init_db
+    MONGO_IMPORT_OK = True
+except Exception:
+    try:
+        from mongo import get_database
+        from collections import (
+            admins_col,
+            subjects_col,
+            questions_col,
+            semester_links_col,
+            responses_col,
+            counters_col,
+        )
+        from init_db import init_db
+        MONGO_IMPORT_OK = True
+    except Exception:
+        MONGO_IMPORT_OK = False
+
+# ============================================================================
+# GEMINI
+# ============================================================================
+
+GEMINI_MODEL = "gemini-3-flash-preview"
 _gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
 
 def moderate_answer(question_text, answer_text):
     """Returns (is_acceptable, reason, tip) using Gemini."""
@@ -29,28 +70,45 @@ or
 
     try:
         response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt
+            model=GEMINI_MODEL,
+            contents=prompt,
         )
-        text = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        text = (
+            response.text.strip()
+            .removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
         parsed = json.loads(text)
         if parsed.get("acceptable", True):
             return True, None, None
-        else:
-            return False, parsed.get("reason", "Please provide a more constructive answer."), parsed.get("tip", "")
+        return (
+            False,
+            parsed.get("reason", "Please provide a more constructive answer."),
+            parsed.get("tip", ""),
+        )
     except Exception:
         return True, None, None  # Fail open if API is unreachable
+
 
 def check_llm_status():
     """Returns (is_online, response_time_ms, message)."""
     try:
         start = time.time()
         response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL, contents="Reply with only the word: OK"
+            model=GEMINI_MODEL,
+            contents="Reply with only the word: OK",
         )
         elapsed = int((time.time() - start) * 1000)
         return True, elapsed, response.text.strip()
     except Exception as e:
         return False, None, str(e)
+
+
+# ============================================================================
+# STREAMLIT CONFIG
+# ============================================================================
 
 st.set_page_config(
     page_title="CourseVoice",
@@ -77,83 +135,248 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-def hpw(p): return hashlib.sha256(p.encode()).hexdigest()
 
-def load_data():
-    if DATA_PATH.exists():
-        with open(DATA_PATH, "r") as f:
-            return json.load(f)
-    default = {
+def hpw(p):
+    return hashlib.sha256(p.encode()).hexdigest()
+
+
+# ============================================================================
+# STORAGE LAYER
+# MongoDB primary, JSON fallback
+# ============================================================================
+
+def default_data():
+    return {
         "admins": [{"id": 1, "username": "admin", "password_hash": hpw("admin123")}],
         "subjects": [
-            {"id": i+1, "name": s, "active": 1}
-            for i, s in enumerate(["AP Physics 1","IB English HL","IB English SL",
-                                   "IM 1","IM 2","IM 3","Physics","Symphonic Band"])
+            {"id": i + 1, "name": s, "active": 1}
+            for i, s in enumerate(
+                [
+                    "AP Physics 1",
+                    "IB English HL",
+                    "IB English SL",
+                    "IM 1",
+                    "IM 2",
+                    "IM 3",
+                    "Physics",
+                    "Symphonic Band",
+                ]
+            )
         ],
         "questions": [
-            {"id": 1, "question_text": "Which subject is this about?",                    "question_type": "dropdown", "order_num": 1, "active": 1, "ai_moderated": 0},
-            {"id": 2, "question_text": "How has this course helped you?",                  "question_type": "text",     "order_num": 2, "active": 1, "ai_moderated": 1},
-            {"id": 3, "question_text": "How difficult was the course?",                    "question_type": "rating",   "order_num": 3, "active": 1, "ai_moderated": 0},
-            {"id": 4, "question_text": "Do you think the course should be offered again?", "question_type": "yes_no",   "order_num": 4, "active": 1, "ai_moderated": 0},
+            {
+                "id": 1,
+                "question_text": "Which subject is this about?",
+                "question_type": "dropdown",
+                "order_num": 1,
+                "active": 1,
+                "ai_moderated": 0,
+            },
+            {
+                "id": 2,
+                "question_text": "How has this course helped you?",
+                "question_type": "text",
+                "order_num": 2,
+                "active": 1,
+                "ai_moderated": 1,
+            },
+            {
+                "id": 3,
+                "question_text": "How difficult was the course?",
+                "question_type": "rating",
+                "order_num": 3,
+                "active": 1,
+                "ai_moderated": 0,
+            },
+            {
+                "id": 4,
+                "question_text": "Do you think the course should be offered again?",
+                "question_type": "yes_no",
+                "order_num": 4,
+                "active": 1,
+                "ai_moderated": 0,
+            },
         ],
         "semester_links": [],
         "responses": [],
-        "_next_ids": {"subjects": 9, "questions": 5, "semester_links": 1, "responses": 1}
+        "_next_ids": {
+            "subjects": 9,
+            "questions": 5,
+            "semester_links": 1,
+            "responses": 1,
+        },
     }
-    save_data(default)
-    return default
 
-def save_data(data):
-    with open(DATA_PATH, "w") as f:
+
+def _save_json(data):
+    with open(DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
+
+def _load_json():
+    if DATA_PATH.exists():
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    data = default_data()
+    _save_json(data)
+    return data
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def mongo_available():
+    if not MONGO_IMPORT_OK:
+        return False
+
+    try:
+        db = get_database()
+        db.command("ping")
+        init_db()
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_ids_exist(data):
+    data.setdefault("_next_ids", {})
+    for name, start in {
+        "subjects": 9,
+        "questions": 5,
+        "semester_links": 1,
+        "responses": 1,
+    }.items():
+        data["_next_ids"].setdefault(name, start)
+    return data
+
+
+def _load_from_mongo():
+    init_db()
+
+    data = {
+        "admins": list(admins_col().find({}, {"_id": 0})),
+        "subjects": list(subjects_col().find({}, {"_id": 0})),
+        "questions": list(questions_col().find({}, {"_id": 0})),
+        "semester_links": list(semester_links_col().find({}, {"_id": 0})),
+        "responses": list(responses_col().find({}, {"_id": 0})),
+        "_next_ids": {},
+    }
+
+    for doc in counters_col().find({}, {"_id": 1, "seq": 1}):
+        data["_next_ids"][doc["_id"]] = doc["seq"]
+
+    return _ensure_ids_exist(data)
+
+
+def _save_to_mongo(data):
+    init_db()
+    data = _ensure_ids_exist(data)
+
+    # Full replace to preserve current app logic with minimal rewrites.
+    # This is okay for low-volume Streamlit usage.
+    admins_col().delete_many({})
+    subjects_col().delete_many({})
+    questions_col().delete_many({})
+    semester_links_col().delete_many({})
+    responses_col().delete_many({})
+
+    if data.get("admins"):
+        admins_col().insert_many(data["admins"])
+    if data.get("subjects"):
+        subjects_col().insert_many(data["subjects"])
+    if data.get("questions"):
+        questions_col().insert_many(data["questions"])
+    if data.get("semester_links"):
+        semester_links_col().insert_many(data["semester_links"])
+    if data.get("responses"):
+        responses_col().insert_many(data["responses"])
+
+    for key, seq in data["_next_ids"].items():
+        counters_col().update_one(
+            {"_id": key},
+            {"$set": {"seq": seq}},
+            upsert=True,
+        )
+
+    mongo_available.clear()
+
+
+def load_data():
+    if mongo_available():
+        try:
+            return _load_from_mongo()
+        except Exception:
+            return _load_json()
+    return _load_json()
+
+
+def save_data(data):
+    data = _ensure_ids_exist(data)
+
+    if mongo_available():
+        try:
+            _save_to_mongo(data)
+            return
+        except Exception:
+            _save_json(data)
+            return
+
+    _save_json(data)
+
+
 def next_id(data, table):
+    data = _ensure_ids_exist(data)
     nid = data["_next_ids"].get(table, 1)
     data["_next_ids"][table] = nid + 1
     return nid
 
-TOKEN       = st.query_params.get("token", None)
+
+# ============================================================================
+# ROUTING / THEMING
+# ============================================================================
+
+TOKEN = st.query_params.get("token", None)
 ADMIN_PARAM = st.query_params.get("admin", None)
-DARK        = st.session_state.dark_mode
-IS_ADMIN    = (ADMIN_PARAM is not None or st.session_state.admin_logged_in) and TOKEN is None
-ACC         = "#FFD700"
+DARK = st.session_state.dark_mode
+IS_ADMIN = (ADMIN_PARAM is not None or st.session_state.admin_logged_in) and TOKEN is None
+ACC = "#FFD700"
 
 if IS_ADMIN:
-    BG   = "#4a6295"
-    FG   = "#ffffff"
-    INP  = "rgba(30,45,80,0.55)"
-    BDR  = "rgba(255,215,0,0.85)"
-    MUTED= "rgba(255,255,255,0.55)"
+    BG = "#4a6295"
+    FG = "#ffffff"
+    INP = "rgba(30,45,80,0.55)"
+    BDR = "rgba(255,215,0,0.85)"
+    MUTED = "rgba(255,255,255,0.55)"
     CARD = "rgba(255,255,255,0.13)"
 elif DARK:
-    BG   = "#242424"
-    FG   = "#e2e2e2"
-    INP  = "#2e2e2e"
-    BDR  = ACC
-    MUTED= "#888888"
+    BG = "#242424"
+    FG = "#e2e2e2"
+    INP = "#2e2e2e"
+    BDR = ACC
+    MUTED = "#888888"
     CARD = "#2c2c2c"
 else:
-    BG   = "#e8e4d8"
-    FG   = "#1a1a1a"
-    INP  = "#ffffff"
-    BDR  = "#1a1a1a"
-    MUTED= "#777777"
+    BG = "#e8e4d8"
+    FG = "#1a1a1a"
+    INP = "#ffffff"
+    BDR = "#1a1a1a"
+    MUTED = "#777777"
     CARD = "#ffffff"
 
 if IS_ADMIN:
-    BTN_BG   = "transparent"
-    BTN_FG   = ACC
+    BTN_BG = "transparent"
+    BTN_FG = ACC
     RADIO_BG = "#1a1a1a"
 elif DARK:
-    BTN_BG   = "#1a1a1a"
-    BTN_FG   = "#ffffff"
+    BTN_BG = "#1a1a1a"
+    BTN_FG = "#ffffff"
     RADIO_BG = "#1a1a1a"
 else:
-    BTN_BG   = INP
-    BTN_FG   = "#1a1a1a"
+    BTN_BG = INP
+    BTN_FG = "#1a1a1a"
     RADIO_BG = "#555555"
 
-st.markdown(f"""
+st.markdown(
+    f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap');
 
@@ -504,17 +727,23 @@ div[data-testid="stToggle"] label span {{ color: {FG}; }}
 hr {{ border-color: rgba(255,255,255,0.2); }}
 code {{ background: rgba(0,0,0,0.3); color: {ACC}; border-radius: 6px; padding: 2px 8px; }}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
-# ═══ ADMIN HEADER ═════════════════════════════════════════════════════════════
+# ============================================================================
+# ADMIN HEADER
+# ============================================================================
+
 def render_admin_header():
     c1, _, c3 = st.columns([4, 3, 2])
     with c1:
         st.markdown(
             f'<div style="font-size:0.8rem;color:rgba(255,255,255,0.6)">'
             f'Logged in as <strong style="color:white">{st.session_state.admin_user}</strong></div>',
-            unsafe_allow_html=True)
+            unsafe_allow_html=True,
+        )
     with c3:
         st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
         if st.button("Logout", key="logout_btn"):
@@ -528,7 +757,10 @@ def render_admin_header():
     st.markdown('<hr style="margin:8px 0 20px">', unsafe_allow_html=True)
 
 
-# ═══ STUDENT SURVEY ═══════════════════════════════════════════════════════════
+# ============================================================================
+# STUDENT SURVEY
+# ============================================================================
+
 def page_student(token):
     _, tcol = st.columns([8, 2])
     with tcol:
@@ -543,18 +775,21 @@ def page_student(token):
         st.error("❌ Invalid or expired survey link.")
         return
 
-    subjects  = [s["name"] for s in sorted(data["subjects"], key=lambda x: x["name"]) if s["active"]]
+    subjects = [s["name"] for s in sorted(data["subjects"], key=lambda x: x["name"]) if s["active"]]
     questions = sorted([q for q in data["questions"] if q["active"]], key=lambda x: x["order_num"])
 
     if st.session_state.submitted:
         _, cc, _ = st.columns([1, 3, 1])
         with cc:
-            st.markdown(f"""
+            st.markdown(
+                f"""
             <div style="text-align:center;padding:100px 0">
                 <div style="font-size:3rem;margin-bottom:16px">🎉</div>
                 <div style="font-size:1.8rem;font-weight:700;color:{FG}">Thank you!</div>
                 <div style="font-size:0.9rem;color:{MUTED}">Your feedback has been recorded anonymously.</div>
-            </div>""", unsafe_allow_html=True)
+            </div>""",
+                unsafe_allow_html=True,
+            )
         _, bc, _ = st.columns([1, 4, 1])
         with bc:
             if st.button("Submit another response", use_container_width=True):
@@ -562,15 +797,17 @@ def page_student(token):
                 st.rerun()
         return
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div style="text-align:center;padding:18px 0 28px">
         <div style="font-size:0.68rem;letter-spacing:3.5px;text-transform:uppercase;
                     color:{MUTED};margin-bottom:10px;font-weight:600">{link['label']}</div>
         <div style="font-size:2.2rem;font-weight:800;color:{FG};letter-spacing:-0.5px">Course Feedback</div>
         <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">🔒 All responses are 100% anonymous</div>
-    </div>""", unsafe_allow_html=True)
+    </div>""",
+        unsafe_allow_html=True,
+    )
 
-    # ── Display styled errors from previous submission attempt (outside the form) ──
     if st.session_state.form_errors:
         for e in st.session_state.form_errors:
             if isinstance(e, dict):
@@ -578,42 +815,70 @@ def page_student(token):
                     f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;'
                     f'padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">'
                     f'⚠️ {e["msg"]}</div>',
-                    unsafe_allow_html=True)
+                    unsafe_allow_html=True,
+                )
                 if e.get("tip"):
                     st.markdown(
                         f'<div style="background:#1a2f4a;border:1px solid #3a7bd5;border-radius:8px;'
                         f'padding:12px 16px;margin:4px 0 8px;color:#7eb8f7;font-size:0.88rem">'
                         f'💡 Tip: {e["tip"]}</div>',
-                        unsafe_allow_html=True)
+                        unsafe_allow_html=True,
+                    )
             else:
                 st.markdown(
                     f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;'
                     f'padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">'
                     f'⚠️ {e}</div>',
-                    unsafe_allow_html=True)
+                    unsafe_allow_html=True,
+                )
         st.session_state.form_errors = []
 
     with st.form("sf", clear_on_submit=False):
         for i, q in enumerate(questions):
             if i > 0:
-                st.markdown('<hr style="border:none;border-top:1px solid rgba(128,128,128,0.25);margin:20px 0">', unsafe_allow_html=True)
+                st.markdown(
+                    '<hr style="border:none;border-top:1px solid rgba(128,128,128,0.25);margin:20px 0">',
+                    unsafe_allow_html=True,
+                )
             st.markdown(
                 f'<div style="font-size:0.9rem;color:{FG};margin-bottom:12px;font-weight:400">'
-                f'{q["question_text"]}</div>', unsafe_allow_html=True)
+                f'{q["question_text"]}</div>',
+                unsafe_allow_html=True,
+            )
 
             qt, qid = q["question_type"], q["id"]
             if qt == "dropdown":
-                st.selectbox(" ", ["— Select a subject —"] + subjects,
-                             label_visibility="collapsed", key=f"q{qid}")
+                st.selectbox(
+                    " ",
+                    ["— Select a subject —"] + subjects,
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
             elif qt == "text":
-                val = st.text_input(" ", placeholder="Type your answer here…",
-                                    label_visibility="collapsed", key=f"q{qid}")
+                st.text_input(
+                    " ",
+                    placeholder="Type your answer here…",
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
             elif qt == "rating":
-                st.radio(" ", [1, 2, 3, 4, 5], index=None, horizontal=True,
-                         label_visibility="collapsed", key=f"q{qid}")
+                st.radio(
+                    " ",
+                    [1, 2, 3, 4, 5],
+                    index=None,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
             elif qt == "yes_no":
-                st.radio(" ", ["Yes", "No"], index=None, horizontal=True,
-                         label_visibility="collapsed", key=f"q{qid}")
+                st.radio(
+                    " ",
+                    ["Yes", "No"],
+                    index=None,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
 
         st.markdown("<br>", unsafe_allow_html=True)
         go = st.form_submit_button("SUBMIT", use_container_width=True)
@@ -633,9 +898,17 @@ def page_student(token):
                         errors.append(f'"{q["question_text"]}" cannot be empty.')
                     elif q.get("ai_moderated", 0):
                         with st.spinner("Checking your answer…"):
-                            acceptable, reason, tip = moderate_answer(q["question_text"], str(v).strip())
+                            acceptable, reason, tip = moderate_answer(
+                                q["question_text"],
+                                str(v).strip(),
+                            )
                         if not acceptable:
-                            errors.append({"msg": f'Please revise your answer: {reason}', "tip": tip})
+                            errors.append(
+                                {
+                                    "msg": f"Please revise your answer: {reason}",
+                                    "tip": tip,
+                                }
+                            )
                 elif q["question_type"] in ("rating", "yes_no") and v is None:
                     errors.append(f'Please answer: "{q["question_text"]}"')
 
@@ -648,17 +921,24 @@ def page_student(token):
             else:
                 data2 = load_data()
                 rid = next_id(data2, "responses")
-                data2["responses"].append({
-                    "id": rid, "link_id": link["id"], "subject_name": subj,
-                    "answers_json": json.dumps(ans),
-                    "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
+                data2["responses"].append(
+                    {
+                        "id": rid,
+                        "link_id": link["id"],
+                        "subject_name": subj,
+                        "answers_json": json.dumps(ans),
+                        "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
                 save_data(data2)
                 st.session_state.submitted = True
                 st.rerun()
 
 
-# ═══ LANDING ══════════════════════════════════════════════════════════════════
+# ============================================================================
+# LANDING
+# ============================================================================
+
 def page_landing():
     _, tc = st.columns([8, 2])
     with tc:
@@ -669,13 +949,16 @@ def page_landing():
 
     _, col, _ = st.columns([1, 2, 1])
     with col:
-        st.markdown(f"""
+        st.markdown(
+            f"""
         <div style="text-align:center;padding:80px 0 40px">
             <div style="font-size:3rem;font-weight:800;color:{FG};letter-spacing:-2px">CourseVoice</div>
             <div style="font-size:0.92rem;color:{MUTED};margin-top:10px;margin-bottom:44px">
                 Anonymous course feedback platform
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>""",
+            unsafe_allow_html=True,
+        )
 
         _, bc, _ = st.columns([2, 1, 2])
         with bc:
@@ -683,28 +966,43 @@ def page_landing():
                 st.query_params["admin"] = "1"
                 st.rerun()
 
-        st.markdown(f"""
+        st.markdown(
+            f"""
         <div style="text-align:center;margin-top:32px;font-size:0.85rem;color:{MUTED}">
             Are you a student? Use the survey link your instructor shared with you.
-        </div>""", unsafe_allow_html=True)
+        </div>""",
+            unsafe_allow_html=True,
+        )
 
 
-# ═══ ADMIN LOGIN ══════════════════════════════════════════════════════════════
+# ============================================================================
+# ADMIN LOGIN
+# ============================================================================
+
 def page_login():
     _, col, _ = st.columns([1, 2, 1])
     with col:
-        st.markdown(f"""
+        st.markdown(
+            """
         <div style="text-align:center;padding:70px 0 36px">
             <div style="font-size:2.6rem;font-weight:800;color:white;letter-spacing:-1.5px">CourseVoice</div>
             <div style="font-size:0.88rem;color:rgba(255,255,255,0.6);margin-top:8px">Admin Portal</div>
-        </div>""", unsafe_allow_html=True)
+        </div>""",
+            unsafe_allow_html=True,
+        )
         with st.form("login"):
             user = st.text_input("Username", placeholder="admin")
-            pw   = st.text_input("Password", type="password", placeholder="••••••••")
+            pw = st.text_input("Password", type="password", placeholder="••••••••")
             if st.form_submit_button("Sign In", use_container_width=True):
                 data = load_data()
-                row = next((a for a in data["admins"]
-                            if a["username"] == user and a["password_hash"] == hpw(pw)), None)
+                row = next(
+                    (
+                        a
+                        for a in data["admins"]
+                        if a["username"] == user and a["password_hash"] == hpw(pw)
+                    ),
+                    None,
+                )
                 if row:
                     st.session_state.admin_logged_in = True
                     st.session_state.admin_user = user
@@ -714,14 +1012,19 @@ def page_login():
                     st.error("Invalid credentials. Default: admin / admin123")
 
 
-# ═══ ADMIN HOME ═══════════════════════════════════════════════════════════════
+# ============================================================================
+# ADMIN HOME
+# ============================================================================
+
 def page_admin_home():
     render_admin_header()
 
-    st.markdown(f"""
+    st.markdown(
+        """
     <div style="text-align:center;font-size:2.8rem;font-weight:800;color:white;
                 letter-spacing:-1px;margin:0 0 36px">ADMIN VIEW</div>""",
-                unsafe_allow_html=True)
+        unsafe_allow_html=True,
+    )
 
     _, col, _ = st.columns([1, 3, 1])
     with col:
@@ -735,12 +1038,12 @@ def page_admin_home():
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── LLM Status Check ──────────────────────────────────────────────────
         st.markdown('<hr style="margin:28px 0 20px">', unsafe_allow_html=True)
         st.markdown(
             '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
-            '🤖 AI Moderation Status</div>',
-            unsafe_allow_html=True)
+            "🤖 AI Moderation Status</div>",
+            unsafe_allow_html=True,
+        )
 
         llm_col1, llm_col2, llm_col3 = st.columns([1, 2, 1])
         with llm_col2:
@@ -759,8 +1062,9 @@ def page_admin_home():
                     f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
                     f'Responded in <strong style="color:white">{status["ms"]} ms</strong>'
                     f' &nbsp;·&nbsp; Reply: <code>{status["msg"]}</code></div>'
-                    f'</div>',
-                    unsafe_allow_html=True)
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
             else:
                 st.markdown(
                     f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
@@ -768,24 +1072,31 @@ def page_admin_home():
                     f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
                     f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
                     f'{status["msg"]}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True)
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
         st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
 
-        st.markdown(f"""
+        st.markdown(
+            """
         <div style="text-align:center;margin:0 0 4px">
             <div style="font-size:1.15rem;font-weight:700;color:white">Generate new survey link</div>
             <div style="font-size:0.74rem;color:rgba(255,255,255,0.5);margin-top:6px">
                 Note: editing questions does not affect already-generated links
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>""",
+            unsafe_allow_html=True,
+        )
 
         c1, c2 = st.columns([5, 1])
         with c1:
             sem_in = st.text_input(
-                "_", placeholder="Enter the year and semester (e.g., 2025 Semester 1)",
-                label_visibility="collapsed", key="sem_input")
+                "_",
+                placeholder="Enter the year and semester (e.g., 2025 Semester 1)",
+                label_visibility="collapsed",
+                key="sem_input",
+            )
         with c2:
             st.markdown('<div class="arrow-btn">', unsafe_allow_html=True)
             if st.button("→", key="gen_btn"):
@@ -793,10 +1104,14 @@ def page_admin_home():
                     data = load_data()
                     tok = uuid.uuid4().hex[:8].upper()
                     lid = next_id(data, "semester_links")
-                    data["semester_links"].append({
-                        "id": lid, "label": sem_in.strip(), "token": tok,
-                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
+                    data["semester_links"].append(
+                        {
+                            "id": lid,
+                            "label": sem_in.strip(),
+                            "token": tok,
+                            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
                     save_data(data)
                     st.session_state.gen_token = tok
                     st.rerun()
@@ -809,14 +1124,17 @@ def page_admin_home():
             lr = next((l for l in data["semester_links"] if l["token"] == st.session_state.gen_token), None)
             tok = st.session_state.gen_token
             lbl = lr["label"] if lr else "?"
-            st.markdown(f"""
+            st.markdown(
+                f"""
             <div style="background:rgba(0,0,0,0.3);border-radius:10px;padding:14px 18px;
                         margin-top:12px;border:1px solid rgba(255,215,0,0.3)">
                 <div style="font-size:0.76rem;color:{ACC};font-weight:600;margin-bottom:8px">
                     ✓ Link generated for <strong>{lbl}</strong>
                 </div>
                 <div style="font-size:0.8rem;color:rgba(255,255,255,0.7)">Share this URL with students:</div>
-            </div>""", unsafe_allow_html=True)
+            </div>""",
+                unsafe_allow_html=True,
+            )
             st.code(f"https://sxptkiopucmjsnzgpv4ekh.streamlit.app/?token={tok}")
 
     st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
@@ -827,14 +1145,17 @@ def page_admin_home():
     recent = sorted(data["semester_links"], key=lambda x: x["created_at"], reverse=True)[:6]
 
     if recent:
-        st.markdown('<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Recent survey links</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Recent survey links</div>',
+            unsafe_allow_html=True,
+        )
         for i in range(0, len(recent), 2):
             cols = st.columns(2)
-            for j, row in enumerate(recent[i:i+2]):
+            for j, row in enumerate(recent[i : i + 2]):
                 with cols[j]:
                     rc = resp_counts.get(row["id"], 0)
-                    st.markdown(f"""
+                    st.markdown(
+                        f"""
                     <div style="background:rgba(255,255,255,0.12);border-radius:12px;
                                 padding:16px 20px;margin-bottom:10px;
                                 border:1px solid rgba(255,255,255,0.18)">
@@ -843,17 +1164,24 @@ def page_admin_home():
                             {rc} response(s) &nbsp;·&nbsp; token:
                             <code style="font-size:0.75rem">{row['token']}</code>
                         </div>
-                    </div>""", unsafe_allow_html=True)
+                    </div>""",
+                        unsafe_allow_html=True,
+                    )
 
 
-# ═══ SURVEY RESULTS INDEX ═════════════════════════════════════════════════════
+# ============================================================================
+# SURVEY RESULTS INDEX
+# ============================================================================
+
 def page_admin_results():
     render_admin_header()
 
-    st.markdown(f"""
+    st.markdown(
+        """
     <div style="text-align:center;font-size:2.6rem;font-weight:800;color:white;
                 letter-spacing:-0.5px;margin:0 0 28px">SURVEY RESULTS</div>""",
-                unsafe_allow_html=True)
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK", key="back_res"):
@@ -863,23 +1191,35 @@ def page_admin_results():
 
     sc1, _, sc2 = st.columns([2, 1, 2])
     with sc1:
-        st.markdown('<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Sort by</div>',
-                    unsafe_allow_html=True)
-        sort_v = st.radio("_sb", ["Year and Semester", "Subjects"],
-                          index=0 if st.session_state.sort_by == "semester" else 1,
-                          key="sort_radio", label_visibility="hidden")
+        st.markdown(
+            '<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Sort by</div>',
+            unsafe_allow_html=True,
+        )
+        sort_v = st.radio(
+            "_sb",
+            ["Year and Semester", "Subjects"],
+            index=0 if st.session_state.sort_by == "semester" else 1,
+            key="sort_radio",
+            label_visibility="hidden",
+        )
         st.session_state.sort_by = "semester" if "Semester" in sort_v else "subject"
     with sc2:
-        st.markdown('<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>',
-                    unsafe_allow_html=True)
-        ord_v = st.radio("_ob", ["Ascending", "Descending"],
-                         index=0 if st.session_state.sort_order == "asc" else 1,
-                         key="order_radio", label_visibility="hidden")
+        st.markdown(
+            '<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>',
+            unsafe_allow_html=True,
+        )
+        ord_v = st.radio(
+            "_ob",
+            ["Ascending", "Descending"],
+            index=0 if st.session_state.sort_order == "asc" else 1,
+            key="order_radio",
+            label_visibility="hidden",
+        )
         st.session_state.sort_order = "asc" if ord_v == "Ascending" else "desc"
 
     st.markdown("<br>", unsafe_allow_html=True)
     data = load_data()
-    desc = (st.session_state.sort_order == "desc")
+    desc = st.session_state.sort_order == "desc"
 
     if st.session_state.sort_by == "semester":
         resp_counts = {}
@@ -891,7 +1231,7 @@ def page_admin_results():
             return
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
-            for j, row in enumerate(rows[i:i+2]):
+            for j, row in enumerate(rows[i : i + 2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
                     cnt = resp_counts.get(row["id"], 0)
@@ -906,14 +1246,17 @@ def page_admin_results():
         for r in data["responses"]:
             if r.get("subject_name"):
                 subj_counts[r["subject_name"]] = subj_counts.get(r["subject_name"], 0) + 1
-        rows = sorted([{"subject_name": k, "cnt": v} for k, v in subj_counts.items()],
-                      key=lambda x: x["subject_name"], reverse=desc)
+        rows = sorted(
+            [{"subject_name": k, "cnt": v} for k, v in subj_counts.items()],
+            key=lambda x: x["subject_name"],
+            reverse=desc,
+        )
         if not rows:
             st.info("No responses with subject data yet.")
             return
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
-            for j, row in enumerate(rows[i:i+2]):
+            for j, row in enumerate(rows[i : i + 2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
                     lbl = f"{row['subject_name']}  ({row['cnt']})"
@@ -924,24 +1267,34 @@ def page_admin_results():
                     st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ═══ DETAIL: SEMESTER ═════════════════════════════════════════════════════════
+# ============================================================================
+# DETAIL: SEMESTER
+# ============================================================================
+
 def page_admin_detail_semester():
     render_admin_header()
 
     link_id = st.session_state.drill_link_id
     data = load_data()
-    link      = next((l for l in data["semester_links"] if l["id"] == link_id), None)
-    responses = sorted([r for r in data["responses"] if r["link_id"] == link_id],
-                       key=lambda x: x["submitted_at"], reverse=True)
+    link = next((l for l in data["semester_links"] if l["id"] == link_id), None)
+    responses = sorted(
+        [r for r in data["responses"] if r["link_id"] == link_id],
+        key=lambda x: x["submitted_at"],
+        reverse=True,
+    )
     questions = sorted(data["questions"], key=lambda x: x["order_num"])
 
     if not link:
-        st.error("Semester not found."); return
+        st.error("Semester not found.")
+        return
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div style="text-align:center;font-size:2rem;font-weight:800;color:white;margin:0 0 24px">
         {link['label']}
-    </div>""", unsafe_allow_html=True)
+    </div>""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK TO RESULTS", key="back_det_sem"):
@@ -956,8 +1309,10 @@ def page_admin_detail_semester():
             ans = json.loads(r["answers_json"])
             for rq in rating_qs:
                 v = ans.get(str(rq["id"]))
-                if v and str(v).isdigit(): all_r.append(int(v))
-        except: pass
+                if v and str(v).isdigit():
+                    all_r.append(int(v))
+        except Exception:
+            pass
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Responses", len(responses))
@@ -966,72 +1321,101 @@ def page_admin_detail_semester():
     c3.metric("Subjects", unique_s)
 
     if not responses:
-        st.info("No responses yet."); return
+        st.info("No responses yet.")
+        return
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown('<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">Responses by subject</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">Responses by subject</div>',
+        unsafe_allow_html=True,
+    )
     sc = {}
     for r in responses:
         s = r.get("subject_name") or "Not specified"
         sc[s] = sc.get(s, 0) + 1
     if sc:
-        df_sc = pd.DataFrame(sc.items(), columns=["Subject","Count"]).sort_values("Count", ascending=False)
+        df_sc = pd.DataFrame(sc.items(), columns=["Subject", "Count"]).sort_values("Count", ascending=False)
         st.bar_chart(df_sc.set_index("Subject"))
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown(f'<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">{len(responses)} Individual Responses</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">{len(responses)} Individual Responses</div>',
+        unsafe_allow_html=True,
+    )
 
     for i, r in enumerate(responses):
-        try: ans = json.loads(r["answers_json"])
-        except: ans = {}
+        try:
+            ans = json.loads(r["answers_json"])
+        except Exception:
+            ans = {}
         subj = r.get("subject_name") or "Unknown"
         date = r["submitted_at"][:10] if r.get("submitted_at") else "—"
         with st.expander(f"Response #{i+1} — {subj} — {date}"):
             for q in questions:
                 val = ans.get(str(q["id"]), "—")
                 stars = "⭐" * int(val) if q["question_type"] == "rating" and str(val).isdigit() else ""
-                st.markdown(f"""
+                st.markdown(
+                    f"""
                 <div style="margin-bottom:14px">
                     <div style="font-size:0.74rem;font-weight:600;color:rgba(255,255,255,0.45);margin-bottom:3px">
                         {q['question_text']}
                     </div>
                     <div style="font-size:0.92rem;color:white">{val} {stars}</div>
-                </div>""", unsafe_allow_html=True)
+                </div>""",
+                    unsafe_allow_html=True,
+                )
 
     st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
     rows_exp = []
     for r in responses:
-        rd = {"Semester": link["label"], "Subject": r.get("subject_name"), "Date": r.get("submitted_at")}
+        rd = {
+            "Semester": link["label"],
+            "Subject": r.get("subject_name"),
+            "Date": r.get("submitted_at"),
+        }
         try:
             ans = json.loads(r["answers_json"])
             for q in questions:
                 rd[q["question_text"]] = ans.get(str(q["id"]), "")
-        except: pass
+        except Exception:
+            pass
         rows_exp.append(rd)
     if rows_exp:
-        fn = f"responses_{link['label'].replace(' ','_')}.csv"
-        st.download_button("⬇ Export CSV", pd.DataFrame(rows_exp).to_csv(index=False), fn, "text/csv")
+        fn = f"responses_{link['label'].replace(' ', '_')}.csv"
+        st.download_button(
+            "⬇ Export CSV",
+            pd.DataFrame(rows_exp).to_csv(index=False),
+            fn,
+            "text/csv",
+        )
 
 
-# ═══ DETAIL: SUBJECT ══════════════════════════════════════════════════════════
+# ============================================================================
+# DETAIL: SUBJECT
+# ============================================================================
+
 def page_admin_detail_subject():
     render_admin_header()
 
     subj = st.session_state.drill_subject
     data = load_data()
-    link_map  = {l["id"]: l["label"] for l in data["semester_links"]}
-    responses = sorted([r for r in data["responses"] if r.get("subject_name") == subj],
-                       key=lambda x: x["submitted_at"], reverse=True)
+    link_map = {l["id"]: l["label"] for l in data["semester_links"]}
+    responses = sorted(
+        [r for r in data["responses"] if r.get("subject_name") == subj],
+        key=lambda x: x["submitted_at"],
+        reverse=True,
+    )
     for r in responses:
         r["sem_label"] = link_map.get(r["link_id"], "Unknown")
     questions = sorted(data["questions"], key=lambda x: x["order_num"])
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div style="text-align:center;font-size:2rem;font-weight:800;color:white;margin:0 0 24px">
         {subj}
-    </div>""", unsafe_allow_html=True)
+    </div>""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK TO RESULTS", key="back_det_subj"):
@@ -1046,42 +1430,56 @@ def page_admin_detail_subject():
             for q in questions:
                 if q["question_type"] == "rating":
                     v = ans.get(str(q["id"]))
-                    if v and str(v).isdigit(): all_r.append(int(v))
-        except: pass
+                    if v and str(v).isdigit():
+                        all_r.append(int(v))
+        except Exception:
+            pass
 
     c1, c2 = st.columns(2)
     c1.metric("Total Responses", len(responses))
     c2.metric("Avg Rating", f"{sum(all_r)/len(all_r):.1f}/5" if all_r else "N/A")
 
     if not responses:
-        st.info("No responses for this subject."); return
+        st.info("No responses for this subject.")
+        return
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
     for i, r in enumerate(responses):
-        try: ans = json.loads(r["answers_json"])
-        except: ans = {}
+        try:
+            ans = json.loads(r["answers_json"])
+        except Exception:
+            ans = {}
         with st.expander(f"Response #{i+1} — {r['sem_label']} — {r['submitted_at'][:10]}"):
             for q in questions:
-                if q["question_type"] == "dropdown": continue
+                if q["question_type"] == "dropdown":
+                    continue
                 val = ans.get(str(q["id"]), "—")
                 stars = "⭐" * int(val) if q["question_type"] == "rating" and str(val).isdigit() else ""
-                st.markdown(f"""
+                st.markdown(
+                    f"""
                 <div style="margin-bottom:14px">
                     <div style="font-size:0.74rem;font-weight:600;color:rgba(255,255,255,0.45);margin-bottom:3px">
                         {q['question_text']}
                     </div>
                     <div style="font-size:0.92rem;color:white">{val} {stars}</div>
-                </div>""", unsafe_allow_html=True)
+                </div>""",
+                    unsafe_allow_html=True,
+                )
 
 
-# ═══ EDIT SURVEY ══════════════════════════════════════════════════════════════
+# ============================================================================
+# EDIT SURVEY
+# ============================================================================
+
 def page_admin_edit():
     render_admin_header()
 
-    st.markdown(f"""
+    st.markdown(
+        """
     <div style="text-align:center;font-size:2.4rem;font-weight:800;color:white;
                 letter-spacing:-0.5px;margin:0 0 24px">EDIT SURVEY</div>""",
-                unsafe_allow_html=True)
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK", key="back_edit"):
@@ -1091,19 +1489,20 @@ def page_admin_edit():
 
     data = load_data()
     questions = sorted([q for q in data["questions"] if q["active"]], key=lambda x: x["order_num"])
-    subjects  = sorted([s for s in data["subjects"] if s["active"]], key=lambda x: x["name"])
+    subjects = sorted([s for s in data["subjects"] if s["active"]], key=lambda x: x["name"])
 
-    TYPE_OPTS   = ["dropdown","text","rating","yes_no"]
-    TYPE_LABELS = ["Dropdown ▼","Text","Rating (1-5)","Yes / No"]
-    TYPE_MAP    = dict(zip(TYPE_OPTS, TYPE_LABELS))
-    TYPE_REV    = dict(zip(TYPE_LABELS, TYPE_OPTS))
+    TYPE_OPTS = ["dropdown", "text", "rating", "yes_no"]
+    TYPE_LABELS = ["Dropdown ▼", "Text", "Rating (1-5)", "Yes / No"]
+    TYPE_MAP = dict(zip(TYPE_OPTS, TYPE_LABELS))
+    TYPE_REV = dict(zip(TYPE_LABELS, TYPE_OPTS))
 
     h0, h1, h2, h3, h4 = st.columns([0.5, 4, 2, 1.5, 1.2])
     for txt, col in [("No.", h0), ("Question", h1), ("Type", h2), ("AI Check", h3), ("Remove", h4)]:
         col.markdown(
             f'<div style="font-size:0.78rem;font-weight:700;color:rgba(255,255,255,0.55);'
             f'padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.2)">{txt}</div>',
-            unsafe_allow_html=True)
+            unsafe_allow_html=True,
+        )
 
     st.markdown("")
 
@@ -1112,28 +1511,45 @@ def page_admin_edit():
         with c0:
             st.markdown(
                 f'<div style="padding:14px 0;font-size:0.9rem;color:rgba(255,255,255,0.7)">{i+1}</div>',
-                unsafe_allow_html=True)
+                unsafe_allow_html=True,
+            )
         with c1:
-            st.text_input("_", value=q["question_text"],
-                          label_visibility="collapsed", key=f"qt_{q['id']}")
+            st.text_input(
+                "_",
+                value=q["question_text"],
+                label_visibility="collapsed",
+                key=f"qt_{q['id']}",
+            )
         with c2:
             cur_lbl = TYPE_MAP.get(q["question_type"], "Text")
             idx = TYPE_LABELS.index(cur_lbl) if cur_lbl in TYPE_LABELS else 1
-            st.selectbox("_", TYPE_LABELS, index=idx,
-                         label_visibility="collapsed", key=f"qtp_{q['id']}")
+            st.selectbox(
+                "_",
+                TYPE_LABELS,
+                index=idx,
+                label_visibility="collapsed",
+                key=f"qtp_{q['id']}",
+            )
         with c3:
             if q["question_type"] == "text":
-                st.toggle("🤖", value=bool(q.get("ai_moderated", 0)),
-                          key=f"qai_{q['id']}", help="Enable AI moderation for this answer")
+                st.toggle(
+                    "🤖",
+                    value=bool(q.get("ai_moderated", 0)),
+                    key=f"qai_{q['id']}",
+                    help="Enable AI moderation for this answer",
+                )
             else:
-                st.markdown('<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
-                            unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
+                    unsafe_allow_html=True,
+                )
         with c4:
             st.markdown('<div class="rem-btn">', unsafe_allow_html=True)
             if st.button("−", key=f"rm_{q['id']}"):
                 d = load_data()
                 for qq in d["questions"]:
-                    if qq["id"] == q["id"]: qq["active"] = 0
+                    if qq["id"] == q["id"]:
+                        qq["active"] = 0
                 save_data(d)
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1145,7 +1561,8 @@ def page_admin_edit():
         if st.button("💾 SAVE ALL CHANGES", use_container_width=True, key="save_all"):
             d = load_data()
             for q in d["questions"]:
-                if not q["active"]: continue
+                if not q["active"]:
+                    continue
                 nt = st.session_state.get(f"qt_{q['id']}", q["question_text"])
                 nl = st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"]))
                 q["question_text"] = nt
@@ -1159,28 +1576,45 @@ def page_admin_edit():
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:10px">Add new question</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:10px">Add new question</div>',
+        unsafe_allow_html=True,
+    )
 
     na0, na1, na2, na3, na4 = st.columns([0.5, 4, 2, 1.5, 1.2])
     with na0:
         st.markdown(
             f'<div style="padding:14px 0;font-size:0.9rem;color:rgba(255,255,255,0.35)">{len(questions)+1}</div>',
-            unsafe_allow_html=True)
+            unsafe_allow_html=True,
+        )
     with na1:
-        nq_text = st.text_input("_", placeholder="New question text…",
-                                label_visibility="collapsed", key="nq_text")
+        nq_text = st.text_input(
+            "_",
+            placeholder="New question text…",
+            label_visibility="collapsed",
+            key="nq_text",
+        )
     with na2:
-        nq_type_lbl = st.selectbox("_", TYPE_LABELS,
-                                   label_visibility="collapsed", key="nq_type")
+        nq_type_lbl = st.selectbox(
+            "_",
+            TYPE_LABELS,
+            label_visibility="collapsed",
+            key="nq_type",
+        )
     with na3:
         if nq_type_lbl == "Text":
-            nq_ai = st.toggle("🤖", value=False, key="nq_ai",
-                              help="Enable AI moderation for this answer")
+            nq_ai = st.toggle(
+                "🤖",
+                value=False,
+                key="nq_ai",
+                help="Enable AI moderation for this answer",
+            )
         else:
             nq_ai = False
-            st.markdown('<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                '<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
+                unsafe_allow_html=True,
+            )
     with na4:
         st.markdown('<div class="add-btn">', unsafe_allow_html=True)
         if st.button("＋", key="add_q"):
@@ -1189,12 +1623,16 @@ def page_admin_edit():
                 mo = max((q["order_num"] for q in d["questions"]), default=0)
                 qid = next_id(d, "questions")
                 ntp = TYPE_REV.get(nq_type_lbl, "text")
-                d["questions"].append({
-                    "id": qid, "question_text": nq_text.strip(),
-                    "question_type": ntp,
-                    "order_num": mo + 1, "active": 1,
-                    "ai_moderated": 1 if (ntp == "text" and nq_ai) else 0
-                })
+                d["questions"].append(
+                    {
+                        "id": qid,
+                        "question_text": nq_text.strip(),
+                        "question_type": ntp,
+                        "order_num": mo + 1,
+                        "active": 1,
+                        "ai_moderated": 1 if (ntp == "text" and nq_ai) else 0,
+                    }
+                )
                 save_data(d)
                 st.rerun()
             else:
@@ -1202,29 +1640,37 @@ def page_admin_edit():
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<hr style="margin:28px 0">', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Subjects (for Dropdown question)</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Subjects (for Dropdown question)</div>',
+        unsafe_allow_html=True,
+    )
 
     for subj in subjects:
         s1, s2 = st.columns([7, 1.5])
         with s1:
             st.markdown(
                 f'<div style="padding:10px 0;font-size:0.9rem;color:rgba(255,255,255,0.85)">• {subj["name"]}</div>',
-                unsafe_allow_html=True)
+                unsafe_allow_html=True,
+            )
         with s2:
             st.markdown('<div class="rem-btn">', unsafe_allow_html=True)
             if st.button("−", key=f"rs_{subj['id']}"):
                 d = load_data()
                 for s in d["subjects"]:
-                    if s["id"] == subj["id"]: s["active"] = 0
+                    if s["id"] == subj["id"]:
+                        s["active"] = 0
                 save_data(d)
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
     a1, a2 = st.columns([7, 1.5])
     with a1:
-        ns = st.text_input("_", placeholder="Add new subject…",
-                           label_visibility="collapsed", key="new_subj")
+        ns = st.text_input(
+            "_",
+            placeholder="Add new subject…",
+            label_visibility="collapsed",
+            key="new_subj",
+        )
     with a2:
         st.markdown('<div class="add-btn">', unsafe_allow_html=True)
         if st.button("＋", key="add_s"):
@@ -1243,17 +1689,28 @@ def page_admin_edit():
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ═══ ADMIN DISPATCHER ═════════════════════════════════════════════════════════
+# ============================================================================
+# ADMIN DISPATCHER
+# ============================================================================
+
 def page_admin():
     av = st.session_state.admin_view
-    if av == "home":              page_admin_home()
-    elif av == "results":         page_admin_results()
-    elif av == "detail_semester": page_admin_detail_semester()
-    elif av == "detail_subject":  page_admin_detail_subject()
-    elif av == "edit":            page_admin_edit()
+    if av == "home":
+        page_admin_home()
+    elif av == "results":
+        page_admin_results()
+    elif av == "detail_semester":
+        page_admin_detail_semester()
+    elif av == "detail_subject":
+        page_admin_detail_subject()
+    elif av == "edit":
+        page_admin_edit()
 
 
-# ═══ ROUTER ═══════════════════════════════════════════════════════════════════
+# ============================================================================
+# ROUTER
+# ============================================================================
+
 if TOKEN:
     page_student(TOKEN)
 elif ADMIN_PARAM is not None or st.session_state.admin_logged_in:
