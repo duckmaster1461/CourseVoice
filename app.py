@@ -18,6 +18,7 @@ DATA_PATH = Path("coursevoice.json")
 # ============================================================================
 
 MONGO_IMPORT_OK = False
+MONGO_IMPORT_ERROR = None
 
 try:
     from db.mongo import get_database
@@ -31,7 +32,7 @@ try:
     )
     from db.init_db import init_db
     MONGO_IMPORT_OK = True
-except Exception:
+except Exception as e1:
     try:
         from mongo import get_database
         from db_collections import (
@@ -44,8 +45,12 @@ except Exception:
         )
         from init_db import init_db
         MONGO_IMPORT_OK = True
-    except Exception:
+    except Exception as e2:
         MONGO_IMPORT_OK = False
+        MONGO_IMPORT_ERROR = (
+            f"Primary import failed: {type(e1).__name__}: {e1} | "
+            f"Fallback import failed: {type(e2).__name__}: {e2}"
+        )
 
 # ============================================================================
 # GEMINI
@@ -108,17 +113,71 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-MONGO_STATUS_MSG = None
+# ============================================================================
+# MONGODB DEBUG
+# ============================================================================
 
-if MONGO_IMPORT_OK:
+MONGO_STATUS = {
+    "import_ok": MONGO_IMPORT_OK,
+    "connected": False,
+    "init_ok": False,
+    "mode": "json_fallback",
+    "error": None,
+    "db_name": None,
+    "collections": [],
+}
+
+def check_mongo_debug():
+    global MONGO_STATUS
+
+    MONGO_STATUS = {
+        "import_ok": MONGO_IMPORT_OK,
+        "connected": False,
+        "init_ok": False,
+        "mode": "json_fallback",
+        "error": None,
+        "db_name": None,
+        "collections": [],
+    }
+
+    if not MONGO_IMPORT_OK:
+        MONGO_STATUS["error"] = MONGO_IMPORT_ERROR
+        return MONGO_STATUS
+
     try:
-        get_database().command("ping")
-        init_db()
-    except Exception as e:
-        MONGO_STATUS_MSG = f"MongoDB not available, using fallback/local mode: {e}"
-else:
-    MONGO_STATUS_MSG = "MongoDB modules not loaded — using fallback/local mode"
+        # Check Streamlit secrets first
+        if "MONGODB_URI" not in st.secrets:
+            MONGO_STATUS["error"] = "Missing st.secrets['MONGODB_URI']"
+            return MONGO_STATUS
 
+        db = get_database()
+        db.command("ping")
+
+        MONGO_STATUS["connected"] = True
+        MONGO_STATUS["db_name"] = getattr(db, "name", None)
+
+        init_db()
+        MONGO_STATUS["init_ok"] = True
+        MONGO_STATUS["mode"] = "mongodb"
+
+        try:
+            MONGO_STATUS["collections"] = db.list_collection_names()
+        except Exception:
+            MONGO_STATUS["collections"] = []
+
+        return MONGO_STATUS
+
+    except Exception as e:
+        MONGO_STATUS["error"] = f"{type(e).__name__}: {e}"
+        return MONGO_STATUS
+
+check_mongo_debug()
+
+if MONGO_STATUS["mode"] == "mongodb":
+    MONGO_STATUS_MSG = None
+else:
+    MONGO_STATUS_MSG = f"Mongo fallback active. Reason: {MONGO_STATUS['error']}"
+    
 for k, v in {
     "dark_mode": True,
     "admin_logged_in": False,
@@ -212,30 +271,23 @@ def _save_json(data):
     with open(DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-
 def _load_json():
-    if DATA_PATH.exists():
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+    try:
+        if DATA_PATH.exists():
+            with open(DATA_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
 
-    data = default_data()
-    _save_json(data)
-    return data
-
+        data = default_data()
+        _save_json(data)
+        return data
+    except Exception as e:
+        st.error(f"JSON fallback failed: {type(e).__name__}: {e}")
+        raise
 
 @st.cache_data(ttl=5, show_spinner=False)
 def mongo_available():
-    if not MONGO_IMPORT_OK:
-        return False
-
-    try:
-        db = get_database()
-        db.command("ping")
-        init_db()
-        return True
-    except Exception:
-        return False
-
+    status = check_mongo_debug()
+    return status["mode"] == "mongodb"
 
 def _ensure_ids_exist(data):
     data.setdefault("_next_ids", {})
@@ -1019,6 +1071,16 @@ def page_admin_home():
 
     if MONGO_STATUS_MSG:
         st.warning(MONGO_STATUS_MSG)
+
+    with st.expander("MongoDB Debug Status", expanded=False):
+        status = check_mongo_debug()
+        st.write("Import OK:", status["import_ok"])
+        st.write("Connected:", status["connected"])
+        st.write("Init OK:", status["init_ok"])
+        st.write("Mode:", status["mode"])
+        st.write("Database:", status["db_name"])
+        st.write("Collections:", status["collections"])
+        st.write("Error:", status["error"])
 
     st.markdown(
         """
