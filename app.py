@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import time
-import google.generativeai as genai
+from google import genai
 
 # ============================================================================
 # OPTIONAL MONGODB IMPORTS
@@ -50,11 +50,9 @@ except Exception:
 # ============================================================================
 
 GEMINI_MODEL = "gemini-3-flash-preview"
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-
+client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 def moderate_answer(question_text, answer_text):
-    """Returns (is_acceptable, reason, tip) using Gemini."""
     prompt = f"""You are moderating a student course feedback survey.
 
 Question: "{question_text}"
@@ -69,13 +67,11 @@ or
 {{"acceptable": false, "reason": "brief explanation for the student", "tip": "specific suggestion to improve their answer"}}"""
 
     try:
-        response = genai.GenerativeModel(GEMINI_MODEL).generate_content(prompt)
-        text = (
-            response.text.strip()
-            .replace("```json", "")
-            .replace("```", "")
-            .strip()
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
         )
+        text = response.text.strip().replace("```json", "").replace("```", "").strip()
         parsed = json.loads(text)
         if parsed.get("acceptable", True):
             return True, None, None
@@ -85,21 +81,19 @@ or
             parsed.get("tip", ""),
         )
     except Exception:
-        return True, None, None  # Fail open if API is unreachable
-
+        return True, None, None
 
 def check_llm_status():
-    """Returns (is_online, response_time_ms, message)."""
     try:
         start = time.time()
-        response = genai.GenerativeModel(GEMINI_MODEL).generate_content(
-            "Reply with only the word: OK"
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents="Reply with only the word: OK",
         )
         elapsed = int((time.time() - start) * 1000)
         return True, elapsed, response.text.strip()
     except Exception as e:
         return False, None, str(e)
-
 
 # ============================================================================
 # STREAMLIT CONFIG
