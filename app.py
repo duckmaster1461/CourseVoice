@@ -106,6 +106,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+if MONGO_IMPORT_OK:
+    try:
+        get_database().command("ping")
+        init_db()
+    except Exception as e:
+        st.warning(f"MongoDB not available, using fallback/local mode: {e}")
+else:
+    st.warning("MongoDB modules not loaded — using fallback/local mode")
 DATA_PATH = Path("coursevoice.json")
 
 for k, v in {

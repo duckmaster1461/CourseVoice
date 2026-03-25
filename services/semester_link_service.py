@@ -1,4 +1,4 @@
-from db.db_collections import semester_links_col, counters_col
+from db_collections import semester_links_col, counters_col
 from pymongo import ReturnDocument
 from datetime import datetime
 import uuid

@@ -1,4 +1,4 @@
-from db.mongo import get_database
+from mongo import get_database
 
 
 def admins_col():
