@@ -106,15 +106,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+MONGO_STATUS_MSG = None
+
 if MONGO_IMPORT_OK:
     try:
         get_database().command("ping")
         init_db()
     except Exception as e:
-        st.warning(f"MongoDB not available, using fallback/local mode: {e}")
+        MONGO_STATUS_MSG = f"MongoDB not available, using fallback/local mode: {e}"
 else:
-    st.warning("MongoDB modules not loaded — using fallback/local mode")
-DATA_PATH = Path("coursevoice.json")
+    MONGO_STATUS_MSG = "MongoDB modules not loaded — using fallback/local mode"
 
 for k, v in {
     "dark_mode": True,
@@ -1014,6 +1015,9 @@ def page_login():
 def page_admin_home():
     render_admin_header()
 
+    if MONGO_STATUS_MSG:
+        st.warning(MONGO_STATUS_MSG)
+
     st.markdown(
         """
     <div style="text-align:center;font-size:2.8rem;font-weight:800;color:white;
@@ -1130,7 +1134,7 @@ def page_admin_home():
             </div>""",
                 unsafe_allow_html=True,
             )
-            st.code(f"https://coursevoice.streamlit.app/?token={tok}")
+            st.code(f"https://sxptkiopucmjsnzgpv4ekh.streamlit.app/?token={tok}")
 
     st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
     data = load_data()
@@ -1162,7 +1166,6 @@ def page_admin_home():
                     </div>""",
                         unsafe_allow_html=True,
                     )
-
 
 # ============================================================================
 # SURVEY RESULTS INDEX
