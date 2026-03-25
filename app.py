@@ -11,8 +11,8 @@ import google.generativeai as genai
 # ============================================================================
 # OPTIONAL MONGODB IMPORTS
 # Supports both:
-# 1) db.mongo / db.collections / db.init_db
-# 2) mongo / collections / init_db
+# 1) db.mongo / db.db_collections / db.init_db
+# 2) mongo / db_collections / init_db
 # ============================================================================
 
 MONGO_IMPORT_OK = False
@@ -32,7 +32,7 @@ try:
 except Exception:
     try:
         from mongo import get_database
-        from collections import (
+        from db_collections import (
             admins_col,
             subjects_col,
             questions_col,
@@ -51,6 +51,7 @@ except Exception:
 
 GEMINI_MODEL = "gemini-3-flash-preview"
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+
 
 def moderate_answer(question_text, answer_text):
     """Returns (is_acceptable, reason, tip) using Gemini."""
@@ -71,9 +72,8 @@ or
         response = genai.GenerativeModel(GEMINI_MODEL).generate_content(prompt)
         text = (
             response.text.strip()
-            .removeprefix("```json")
-            .removeprefix("```")
-            .removesuffix("```")
+            .replace("```json", "")
+            .replace("```", "")
             .strip()
         )
         parsed = json.loads(text)
@@ -92,9 +92,8 @@ def check_llm_status():
     """Returns (is_online, response_time_ms, message)."""
     try:
         start = time.time()
-        response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents="Reply with only the word: OK",
+        response = genai.GenerativeModel(GEMINI_MODEL).generate_content(
+            "Reply with only the word: OK"
         )
         elapsed = int((time.time() - start) * 1000)
         return True, elapsed, response.text.strip()
@@ -267,8 +266,6 @@ def _save_to_mongo(data):
     init_db()
     data = _ensure_ids_exist(data)
 
-    # Full replace to preserve current app logic with minimal rewrites.
-    # This is okay for low-volume Streamlit usage.
     admins_col().delete_many({})
     subjects_col().delete_many({})
     questions_col().delete_many({})
@@ -1041,7 +1038,7 @@ def page_admin_home():
             unsafe_allow_html=True,
         )
 
-        llm_col1, llm_col2, llm_col3 = st.columns([1, 2, 1])
+        _, llm_col2, _ = st.columns([1, 2, 1])
         with llm_col2:
             if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
                 with st.spinner("Pinging Gemini…"):
@@ -1131,7 +1128,7 @@ def page_admin_home():
             </div>""",
                 unsafe_allow_html=True,
             )
-            st.code(f"https://coursevoice.streamlit.app/?token={tok}")
+            st.code(f"https://sxptkiopucmjsnzgpv4ekh.streamlit.app/?token={tok}")
 
     st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
     data = load_data()
