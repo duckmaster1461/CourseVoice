@@ -40,7 +40,7 @@ except Exception as e:
 # GEMINI
 # ============================================================================
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "Gemini-2.5-Flash"
 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 
