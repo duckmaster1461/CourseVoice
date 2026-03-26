@@ -1,18 +1,18 @@
 import streamlit as st
 import pandas as pd
 import json
-import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
 import time
 from google import genai
+from utils.security import hpw
+from db.init_db import init_db, seed_payload
 
-DATA_PATH = Path("coursevoice.json")
+DATA_PATH = Path("CourseVoice")
 
 # ============================================================================
 # MONGODB IMPORTS
-# Package layout: db/mongo.py, db/db_collections.py, db/init_db.py
 # ============================================================================
 
 MONGO_IMPORT_OK = False
@@ -28,12 +28,11 @@ try:
         responses_col,
         counters_col,
     )
-    from db.init_db import init_db
     MONGO_IMPORT_OK = True
 except Exception as e:
     MONGO_IMPORT_OK = False
     MONGO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
-    
+
 # ============================================================================
 # GEMINI
 # ============================================================================
@@ -96,71 +95,10 @@ st.set_page_config(
 )
 
 # ============================================================================
-# MONGODB DEBUG
+# SESSION STATE
 # ============================================================================
 
-MONGO_STATUS = {
-    "import_ok": MONGO_IMPORT_OK,
-    "connected": False,
-    "init_ok": False,
-    "mode": "json_fallback",
-    "error": None,
-    "db_name": None,
-    "collections": [],
-}
-
-def check_mongo_debug():
-    global MONGO_STATUS
-
-    MONGO_STATUS = {
-        "import_ok": MONGO_IMPORT_OK,
-        "connected": False,
-        "init_ok": False,
-        "mode": "json_fallback",
-        "error": None,
-        "db_name": None,
-        "collections": [],
-    }
-
-    if not MONGO_IMPORT_OK:
-        MONGO_STATUS["error"] = MONGO_IMPORT_ERROR
-        return MONGO_STATUS
-
-    try:
-        # Check Streamlit secrets first
-        if "MONGODB_URI" not in st.secrets:
-            MONGO_STATUS["error"] = "Missing st.secrets['MONGODB_URI']"
-            return MONGO_STATUS
-
-        db = get_database()
-        db.command("ping")
-
-        MONGO_STATUS["connected"] = True
-        MONGO_STATUS["db_name"] = getattr(db, "name", None)
-
-        init_db()
-        MONGO_STATUS["init_ok"] = True
-        MONGO_STATUS["mode"] = "mongodb"
-
-        try:
-            MONGO_STATUS["collections"] = db.list_collection_names()
-        except Exception:
-            MONGO_STATUS["collections"] = []
-
-        return MONGO_STATUS
-
-    except Exception as e:
-        MONGO_STATUS["error"] = f"{type(e).__name__}: {e}"
-        return MONGO_STATUS
-
-check_mongo_debug()
-
-if MONGO_STATUS["mode"] == "mongodb":
-    MONGO_STATUS_MSG = None
-else:
-    MONGO_STATUS_MSG = f"Mongo fallback active. Reason: {MONGO_STATUS['error']}"
-    
-for k, v in {
+SESSION_DEFAULTS = {
     "dark_mode": True,
     "admin_logged_in": False,
     "admin_user": "",
@@ -172,104 +110,74 @@ for k, v in {
     "gen_token": None,
     "submitted": False,
     "form_errors": [],
-}.items():
+    "llm_status": None,
+    "admin_notice": None,
+}
+
+for k, v in SESSION_DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+# ============================================================================
+# MONGODB STATUS
+# ============================================================================
 
-def hpw(p):
-    return hashlib.sha256(p.encode()).hexdigest()
+@st.cache_data(ttl=10, show_spinner=False)
+def get_mongo_status():
+    status = {
+        "import_ok": MONGO_IMPORT_OK,
+        "connected": False,
+        "init_ok": False,
+        "mode": "json_fallback",
+        "error": None,
+        "db_name": None,
+        "collections": [],
+    }
 
+    if not MONGO_IMPORT_OK:
+        status["error"] = MONGO_IMPORT_ERROR
+        return status
+
+    try:
+        if "MONGODB_URI" not in st.secrets:
+            status["error"] = "Missing st.secrets['MONGODB_URI']"
+            return status
+
+        db = get_database()
+        db.command("ping")
+
+        status["connected"] = True
+        status["db_name"] = getattr(db, "name", None)
+
+        init_db()
+        status["init_ok"] = True
+        status["mode"] = "mongodb"
+
+        try:
+            status["collections"] = db.list_collection_names()
+        except Exception:
+            status["collections"] = []
+
+        return status
+
+    except Exception as e:
+        status["error"] = f"{type(e).__name__}: {e}"
+        return status
+
+def clear_runtime_caches():
+    get_mongo_status.clear()
+    mongo_available.clear()
+
+@st.cache_data(ttl=10, show_spinner=False)
+def mongo_available():
+    return get_mongo_status()["mode"] == "mongodb"
+
+MONGO_STATUS = get_mongo_status()
+MONGO_STATUS_MSG = None if MONGO_STATUS["mode"] == "mongodb" else f"Mongo fallback active. Reason: {MONGO_STATUS['error']}"
 
 # ============================================================================
 # STORAGE LAYER
-# MongoDB primary, JSON fallback
 # ============================================================================
-
-def default_data():
-    return {
-        "admins": [{"id": 1, "username": "admin", "password_hash": hpw("admin123")}],
-        "subjects": [
-            {"id": i + 1, "name": s, "active": 1}
-            for i, s in enumerate(
-                [
-                    "AP Physics 1",
-                    "IB English HL",
-                    "IB English SL",
-                    "IM 1",
-                    "IM 2",
-                    "IM 3",
-                    "Physics",
-                    "Symphonic Band",
-                ]
-            )
-        ],
-        "questions": [
-            {
-                "id": 1,
-                "question_text": "Which subject is this about?",
-                "question_type": "dropdown",
-                "order_num": 1,
-                "active": 1,
-                "ai_moderated": 0,
-            },
-            {
-                "id": 2,
-                "question_text": "How has this course helped you?",
-                "question_type": "text",
-                "order_num": 2,
-                "active": 1,
-                "ai_moderated": 1,
-            },
-            {
-                "id": 3,
-                "question_text": "How difficult was the course?",
-                "question_type": "rating",
-                "order_num": 3,
-                "active": 1,
-                "ai_moderated": 0,
-            },
-            {
-                "id": 4,
-                "question_text": "Do you think the course should be offered again?",
-                "question_type": "yes_no",
-                "order_num": 4,
-                "active": 1,
-                "ai_moderated": 0,
-            },
-        ],
-        "semester_links": [],
-        "responses": [],
-        "_next_ids": {
-            "subjects": 9,
-            "questions": 5,
-            "semester_links": 1,
-            "responses": 1,
-        },
-    }
-
-
-def _save_json(data):
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-def _load_json():
-    try:
-        if DATA_PATH.exists():
-            with open(DATA_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-
-        data = default_data()
-        _save_json(data)
-        return data
-    except Exception as e:
-        st.error(f"JSON fallback failed: {type(e).__name__}: {e}")
-        raise
-
-@st.cache_data(ttl=5, show_spinner=False)
-def mongo_available():
-    status = check_mongo_debug()
-    return status["mode"] == "mongodb"
 
 def _ensure_ids_exist(data):
     data.setdefault("_next_ids", {})
@@ -282,6 +190,22 @@ def _ensure_ids_exist(data):
         data["_next_ids"].setdefault(name, start)
     return data
 
+def _save_json(data):
+    with open(DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def _load_json():
+    try:
+        if DATA_PATH.exists():
+            with open(DATA_PATH, "r", encoding="utf-8") as f:
+                return _ensure_ids_exist(json.load(f))
+
+        data = seed_payload()
+        _save_json(data)
+        return _ensure_ids_exist(data)
+    except Exception as e:
+        st.error(f"JSON fallback failed: {type(e).__name__}: {e}")
+        raise
 
 def _load_from_mongo():
     init_db()
@@ -299,7 +223,6 @@ def _load_from_mongo():
         data["_next_ids"][doc["_id"]] = doc["seq"]
 
     return _ensure_ids_exist(data)
-
 
 def _save_to_mongo(data):
     init_db()
@@ -329,9 +252,6 @@ def _save_to_mongo(data):
             upsert=True,
         )
 
-    mongo_available.clear()
-
-
 def load_data():
     if mongo_available():
         try:
@@ -340,20 +260,21 @@ def load_data():
             return _load_json()
     return _load_json()
 
-
 def save_data(data):
     data = _ensure_ids_exist(data)
 
     if mongo_available():
         try:
             _save_to_mongo(data)
+            clear_runtime_caches()
             return
         except Exception:
             _save_json(data)
+            clear_runtime_caches()
             return
 
     _save_json(data)
-
+    clear_runtime_caches()
 
 def next_id(data, table):
     data = _ensure_ids_exist(data)
@@ -361,6 +282,27 @@ def next_id(data, table):
     data["_next_ids"][table] = nid + 1
     return nid
 
+# ============================================================================
+# NAV / STATE HELPERS
+# ============================================================================
+
+def go_admin(view, *, drill_link_id=None, drill_subject=None):
+    st.session_state.admin_view = view
+    st.session_state.drill_link_id = drill_link_id
+    st.session_state.drill_subject = drill_subject
+    st.rerun()
+
+def logout_admin():
+    st.session_state.admin_logged_in = False
+    st.session_state.admin_user = ""
+    st.session_state.admin_view = "home"
+    st.session_state.drill_link_id = None
+    st.session_state.drill_subject = None
+    st.session_state.gen_token = None
+    st.session_state.llm_status = None
+    st.session_state.admin_notice = None
+    st.query_params.clear()
+    st.rerun()
 
 # ============================================================================
 # ROUTING / THEMING
@@ -435,12 +377,14 @@ html, body, .stApp,
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"],
 section[data-testid="stMainBlockContainer"] {{ background-color: {BG}; }}
+
 .block-container {{
     background: transparent;
     padding: 1.4rem 2.2rem;
     max-width: 900px;
     margin: 0 auto;
 }}
+
 #MainMenu, footer, header, [data-testid="stToolbar"],
 div[data-testid="stDecoration"] {{ visibility: hidden; display: none; }}
 
@@ -763,7 +707,6 @@ code {{ background: rgba(0,0,0,0.3); color: {ACC}; border-radius: 6px; padding: 
     unsafe_allow_html=True,
 )
 
-
 # ============================================================================
 # ADMIN HEADER
 # ============================================================================
@@ -779,15 +722,9 @@ def render_admin_header():
     with c3:
         st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
         if st.button("Logout", key="logout_btn"):
-            st.session_state.admin_logged_in = False
-            st.session_state.admin_user = ""
-            st.session_state.admin_view = "home"
-            st.session_state.gen_token = None
-            st.query_params.clear()
-            st.rerun()
+            logout_admin()
         st.markdown("</div>", unsafe_allow_html=True)
     st.markdown('<hr style="margin:8px 0 20px">', unsafe_allow_html=True)
-
 
 # ============================================================================
 # STUDENT SURVEY
@@ -966,7 +903,6 @@ def page_student(token):
                 st.session_state.submitted = True
                 st.rerun()
 
-
 # ============================================================================
 # LANDING
 # ============================================================================
@@ -1006,7 +942,6 @@ def page_landing():
             unsafe_allow_html=True,
         )
 
-
 # ============================================================================
 # ADMIN LOGIN
 # ============================================================================
@@ -1022,27 +957,30 @@ def page_login():
         </div>""",
             unsafe_allow_html=True,
         )
-        with st.form("login"):
-            user = st.text_input("Username", placeholder="admin")
-            pw = st.text_input("Password", type="password", placeholder="••••••••")
-            if st.form_submit_button("Sign In", use_container_width=True):
-                data = load_data()
-                row = next(
-                    (
-                        a
-                        for a in data["admins"]
-                        if a["username"] == user and a["password_hash"] == hpw(pw)
-                    ),
-                    None,
-                )
-                if row:
-                    st.session_state.admin_logged_in = True
-                    st.session_state.admin_user = user
-                    st.query_params["admin"] = "1"
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials. Default: admin / admin123")
 
+        with st.form("login_form", clear_on_submit=False):
+            user = st.text_input("Username", placeholder="admin", key="login_username")
+            pw = st.text_input("Password", type="password", placeholder="••••••••", key="login_password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+
+        if submitted:
+            data = load_data()
+            row = next(
+                (
+                    a
+                    for a in data["admins"]
+                    if a["username"] == user and a["password_hash"] == hpw(pw)
+                ),
+                None,
+            )
+            if row:
+                st.session_state.admin_logged_in = True
+                st.session_state.admin_user = user
+                st.session_state.admin_view = "home"
+                st.query_params["admin"] = "1"
+                st.rerun()
+            else:
+                st.error("Invalid credentials. Default: admin / admin123")
 
 # ============================================================================
 # ADMIN HOME
@@ -1055,7 +993,7 @@ def page_admin_home():
         st.warning(MONGO_STATUS_MSG)
 
     with st.expander("MongoDB Debug Status", expanded=False):
-        status = check_mongo_debug()
+        status = get_mongo_status()
         st.write("Import OK:", status["import_ok"])
         st.write("Connected:", status["connected"])
         st.write("Init OK:", status["init_ok"])
@@ -1075,12 +1013,10 @@ def page_admin_home():
     with col:
         st.markdown('<div class="admin-action">', unsafe_allow_html=True)
         if st.button("VIEW SURVEY RESULTS", use_container_width=True, key="go_results"):
-            st.session_state.admin_view = "results"
-            st.rerun()
+            go_admin("results")
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("ADD/EDIT SURVEY QUESTIONS", use_container_width=True, key="go_edit"):
-            st.session_state.admin_view = "edit"
-            st.rerun()
+            go_admin("edit")
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<hr style="margin:28px 0 20px">', unsafe_allow_html=True)
@@ -1095,7 +1031,7 @@ def page_admin_home():
             if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
                 with st.spinner("Pinging Gemini…"):
                     online, ms, msg = check_llm_status()
-                st.session_state["llm_status"] = {"online": online, "ms": ms, "msg": msg}
+                st.session_state.llm_status = {"online": online, "ms": ms, "msg": msg}
 
         status = st.session_state.get("llm_status")
         if status is not None:
@@ -1134,35 +1070,42 @@ def page_admin_home():
             unsafe_allow_html=True,
         )
 
-        c1, c2 = st.columns([5, 1])
-        with c1:
-            sem_in = st.text_input(
-                "_",
-                placeholder="Enter the year and semester (e.g., 2025 Semester 1)",
-                label_visibility="collapsed",
-                key="sem_input",
-            )
-        with c2:
-            st.markdown('<div class="arrow-btn">', unsafe_allow_html=True)
-            if st.button("→", key="gen_btn"):
-                if sem_in and sem_in.strip():
-                    data = load_data()
-                    tok = uuid.uuid4().hex[:8].upper()
-                    lid = next_id(data, "semester_links")
-                    data["semester_links"].append(
-                        {
-                            "id": lid,
-                            "label": sem_in.strip(),
-                            "token": tok,
-                            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-                    )
-                    save_data(data)
-                    st.session_state.gen_token = tok
-                    st.rerun()
-                else:
-                    st.warning("Enter a semester label first.")
-            st.markdown("</div>", unsafe_allow_html=True)
+        with st.form("generate_link_form", clear_on_submit=True):
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                sem_in = st.text_input(
+                    "_",
+                    placeholder="Enter the year and semester (e.g., 2025 Semester 1)",
+                    label_visibility="collapsed",
+                    key="sem_input_form",
+                )
+            with c2:
+                st.markdown('<div class="arrow-btn">', unsafe_allow_html=True)
+                gen_submit = st.form_submit_button("→", use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        if gen_submit:
+            if sem_in and sem_in.strip():
+                data = load_data()
+                tok = uuid.uuid4().hex[:8].upper()
+                lid = next_id(data, "semester_links")
+                data["semester_links"].append(
+                    {
+                        "id": lid,
+                        "label": sem_in.strip(),
+                        "token": tok,
+                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+                save_data(data)
+                st.session_state.gen_token = tok
+                st.session_state.admin_notice = f"Link generated for {sem_in.strip()}"
+                st.rerun()
+            else:
+                st.warning("Enter a semester label first.")
+
+        if st.session_state.admin_notice:
+            st.success(st.session_state.admin_notice)
 
         if st.session_state.gen_token:
             data = load_data()
@@ -1196,7 +1139,7 @@ def page_admin_home():
         )
         for i in range(0, len(recent), 2):
             cols = st.columns(2)
-            for j, row in enumerate(recent[i : i + 2]):
+            for j, row in enumerate(recent[i:i + 2]):
                 with cols[j]:
                     rc = resp_counts.get(row["id"], 0)
                     st.markdown(
@@ -1229,8 +1172,7 @@ def page_admin_results():
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK", key="back_res"):
-        st.session_state.admin_view = "home"
-        st.rerun()
+        go_admin("home")
     st.markdown("</div><br>", unsafe_allow_html=True)
 
     sc1, _, sc2 = st.columns([2, 1, 2])
@@ -1247,6 +1189,7 @@ def page_admin_results():
             label_visibility="hidden",
         )
         st.session_state.sort_by = "semester" if "Semester" in sort_v else "subject"
+
     with sc2:
         st.markdown(
             '<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>',
@@ -1275,15 +1218,13 @@ def page_admin_results():
             return
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
-            for j, row in enumerate(rows[i : i + 2]):
+            for j, row in enumerate(rows[i:i + 2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
                     cnt = resp_counts.get(row["id"], 0)
                     lbl = f"{row['label'].upper()}  ({cnt} RESPONSES)"
                     if st.button(lbl, key=f"s_{row['id']}", use_container_width=True):
-                        st.session_state.drill_link_id = row["id"]
-                        st.session_state.admin_view = "detail_semester"
-                        st.rerun()
+                        go_admin("detail_semester", drill_link_id=row["id"])
                     st.markdown("</div>", unsafe_allow_html=True)
     else:
         subj_counts = {}
@@ -1300,16 +1241,13 @@ def page_admin_results():
             return
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
-            for j, row in enumerate(rows[i : i + 2]):
+            for j, row in enumerate(rows[i:i + 2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
                     lbl = f"{row['subject_name']}  ({row['cnt']})"
                     if st.button(lbl, key=f"subj_{row['subject_name']}", use_container_width=True):
-                        st.session_state.drill_subject = row["subject_name"]
-                        st.session_state.admin_view = "detail_subject"
-                        st.rerun()
+                        go_admin("detail_subject", drill_subject=row["subject_name"])
                     st.markdown("</div>", unsafe_allow_html=True)
-
 
 # ============================================================================
 # DETAIL: SEMESTER
@@ -1342,8 +1280,7 @@ def page_admin_detail_semester():
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK TO RESULTS", key="back_det_sem"):
-        st.session_state.admin_view = "results"
-        st.rerun()
+        go_admin("results")
     st.markdown("</div><br>", unsafe_allow_html=True)
 
     rating_qs = [q for q in questions if q["question_type"] == "rating"]
@@ -1433,7 +1370,6 @@ def page_admin_detail_semester():
             "text/csv",
         )
 
-
 # ============================================================================
 # DETAIL: SUBJECT
 # ============================================================================
@@ -1449,8 +1385,6 @@ def page_admin_detail_subject():
         key=lambda x: x["submitted_at"],
         reverse=True,
     )
-    for r in responses:
-        r["sem_label"] = link_map.get(r["link_id"], "Unknown")
     questions = sorted(data["questions"], key=lambda x: x["order_num"])
 
     st.markdown(
@@ -1463,8 +1397,7 @@ def page_admin_detail_subject():
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK TO RESULTS", key="back_det_subj"):
-        st.session_state.admin_view = "results"
-        st.rerun()
+        go_admin("results")
     st.markdown("</div><br>", unsafe_allow_html=True)
 
     all_r = []
@@ -1493,7 +1426,9 @@ def page_admin_detail_subject():
             ans = json.loads(r["answers_json"])
         except Exception:
             ans = {}
-        with st.expander(f"Response #{i+1} — {r['sem_label']} — {r['submitted_at'][:10]}"):
+        sem_label = link_map.get(r["link_id"], "Unknown")
+        safe_date = r["submitted_at"][:10] if r.get("submitted_at") else "—"
+        with st.expander(f"Response #{i+1} — {sem_label} — {safe_date}"):
             for q in questions:
                 if q["question_type"] == "dropdown":
                     continue
@@ -1509,7 +1444,6 @@ def page_admin_detail_subject():
                 </div>""",
                     unsafe_allow_html=True,
                 )
-
 
 # ============================================================================
 # EDIT SURVEY
@@ -1527,8 +1461,7 @@ def page_admin_edit():
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK", key="back_edit"):
-        st.session_state.admin_view = "home"
-        st.rerun()
+        go_admin("home")
     st.markdown("</div><br>", unsafe_allow_html=True)
 
     data = load_data()
@@ -1575,7 +1508,8 @@ def page_admin_edit():
                 key=f"qtp_{q['id']}",
             )
         with c3:
-            if q["question_type"] == "text":
+            current_type = TYPE_REV.get(st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"])), q["question_type"])
+            if current_type == "text":
                 st.toggle(
                     "🤖",
                     value=bool(q.get("ai_moderated", 0)),
@@ -1732,7 +1666,6 @@ def page_admin_edit():
                 st.warning("Enter a subject name.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-
 # ============================================================================
 # ADMIN DISPATCHER
 # ============================================================================
@@ -1749,7 +1682,9 @@ def page_admin():
         page_admin_detail_subject()
     elif av == "edit":
         page_admin_edit()
-
+    else:
+        st.session_state.admin_view = "home"
+        page_admin_home()
 
 # ============================================================================
 # ROUTER
