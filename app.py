@@ -1829,7 +1829,7 @@ def page_admin_home():
             </div>""",
                 unsafe_allow_html=True,
             )
-            st.code(f"https://sxptkiopucmjsnzgpv4ekh.streamlit.app/?token={tok}")
+            st.code(f"https://CourseVoice.streamlit.app/?token={tok}")
 
     st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
     recent = get_recent_links_with_counts(limit=6)
