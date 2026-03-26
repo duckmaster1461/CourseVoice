@@ -150,53 +150,44 @@ def check_db_status():
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def summarize_results_with_gemini(sort_by: str, rows_json: str):
+def summarize_survey_responses_with_gemini(link_label: str, questions_json: str, responses_json: str):
     try:
-        rows = json.loads(rows_json)
+        questions = json.loads(questions_json)
+        responses = json.loads(responses_json)
 
-        if sort_by == "semester":
-            lines = []
-            total_responses = 0
-            for row in rows[:10]:
-                cnt = int(row.get("response_count", 0))
-                total_responses += cnt
-                lines.append(f'- {row.get("label", "Unknown")}: {cnt} responses')
+        if not responses:
+            return "No responses available to summarize."
 
-            context = "\n".join(lines) if lines else "No semester results found."
-            prompt = f"""You are summarizing course survey results for an admin dashboard.
+        question_map = {str(q["id"]): q["question_text"] for q in questions}
 
-Create a very short, simple summary in 2-3 bullet points.
-Keep it factual and concise.
-Do not invent missing data.
+        lines = []
+        for idx, response in enumerate(responses[:12], start=1):
+            subject_name = response.get("subject_name") or "Unknown"
+            submitted_at = response.get("submitted_at") or "Unknown date"
+            answers = response.get("answers", {})
 
-Current view: semester
-Top semester result rows:
-{context}
+            lines.append(f"Response {idx} | Subject: {subject_name} | Date: {submitted_at}")
+            for qid, answer in answers.items():
+                qtext = question_map.get(str(qid), f"Question {qid}")
+                lines.append(f"- {qtext}: {answer}")
+            lines.append("")
 
-Total responses across listed rows: {total_responses}
+        prompt = f"""You are summarizing course survey responses for an admin dashboard.
 
-Return plain text only.
-"""
-        else:
-            lines = []
-            total_responses = 0
-            for row in rows[:10]:
-                cnt = int(row.get("cnt", 0))
-                total_responses += cnt
-                lines.append(f'- {row.get("subject_name", "Unknown")}: {cnt} responses')
+Survey label: {link_label}
 
-            context = "\n".join(lines) if lines else "No subject results found."
-            prompt = f"""You are summarizing course survey results for an admin dashboard.
+Create a very short, simple summary in 3 bullet points max.
+Focus on:
+- overall sentiment
+- recurring positive themes
+- any obvious difficulty or improvement pattern
 
-Create a very short, simple summary in 2-3 bullet points.
-Keep it factual and concise.
-Do not invent missing data.
+Be factual and concise.
+Do not invent missing information.
+Do not mention that you are an AI.
 
-Current view: subject
-Top subject result rows:
-{context}
-
-Total responses across listed rows: {total_responses}
+Survey responses:
+{chr(10).join(lines)}
 
 Return plain text only.
 """
@@ -240,7 +231,6 @@ SESSION_DEFAULTS = {
     "form_errors": [],
     "llm_status": None,
     "db_status": None,
-    "results_summary": None,
     "admin_notice": None,
 }
 
@@ -256,15 +246,21 @@ for k, v in SESSION_DEFAULTS.items():
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def normalize_doc(doc):
     if not doc:
         return None
+
     out = dict(doc)
     oid = out.get("_id")
-    out["mongo_oid"] = str(oid) if oid is not None else None
-    return out
 
+    # keep the original Mongo id available in string form
+    out["mongo_oid"] = str(oid) if oid is not None else None
+
+    # make the _id itself JSON-safe too
+    if oid is not None:
+        out["_id"] = str(oid)
+
+    return out
 
 def normalize_docs(docs):
     return [normalize_doc(d) for d in docs]
@@ -372,7 +368,7 @@ def clear_runtime_caches():
     get_semester_detail_bundle.clear()
     get_subject_detail_bundle.clear()
     get_link_by_token_cached.clear()
-    summarize_results_with_gemini.clear()
+    summarize_survey_responses_with_gemini.clear()
 
 
 MONGO_STATUS = get_mongo_status()
@@ -957,7 +953,6 @@ def logout_admin():
     st.session_state.gen_token = None
     st.session_state.llm_status = None
     st.session_state.db_status = None
-    st.session_state.results_summary = None
     st.session_state.admin_notice = None
     st.query_params.clear()
     st.rerun()
@@ -1918,35 +1913,6 @@ def page_admin_results():
         if not rows:
             st.info("No survey links yet. Generate one from Admin home.")
             return
-
-        rows_for_summary = [
-            {
-                "label": r.get("label"),
-                "response_count": r.get("response_count", 0),
-            }
-            for r in rows
-        ]
-
-        with st.spinner("Summarizing results..."):
-            summary_text = summarize_results_with_gemini(
-                "semester",
-                json.dumps(rows_for_summary, ensure_ascii=False),
-            )
-
-        st.markdown(
-            f"""
-            <div style="background:rgba(255,255,255,0.10);border-radius:12px;
-                        padding:16px 18px;margin:0 0 20px;
-                        border:1px solid rgba(255,255,255,0.18)">
-                <div style="font-size:0.82rem;font-weight:700;color:{ACC};margin-bottom:8px">
-                    Gemini Summary
-                </div>
-                <div style="font-size:0.85rem;color:white;line-height:1.6;white-space:pre-wrap">{summary_text}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
             for j, row in enumerate(rows[i:i + 2]):
@@ -1962,35 +1928,6 @@ def page_admin_results():
         if not rows:
             st.info("No responses with subject data yet.")
             return
-
-        rows_for_summary = [
-            {
-                "subject_name": r.get("subject_name"),
-                "cnt": r.get("cnt", 0),
-            }
-            for r in rows
-        ]
-
-        with st.spinner("Summarizing results..."):
-            summary_text = summarize_results_with_gemini(
-                "subject",
-                json.dumps(rows_for_summary, ensure_ascii=False),
-            )
-
-        st.markdown(
-            f"""
-            <div style="background:rgba(255,255,255,0.10);border-radius:12px;
-                        padding:16px 18px;margin:0 0 20px;
-                        border:1px solid rgba(255,255,255,0.18)">
-                <div style="font-size:0.82rem;font-weight:700;color:{ACC};margin-bottom:8px">
-                    Gemini Summary
-                </div>
-                <div style="font-size:0.85rem;color:white;line-height:1.6;white-space:pre-wrap">{summary_text}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
             for j, row in enumerate(rows[i:i + 2]):
@@ -2047,6 +1984,48 @@ def page_admin_detail_semester():
     if not responses:
         st.info("No responses yet.")
         return
+
+    summary_payload = []
+    for r in responses:
+        summary_payload.append(
+            {
+                "id": r.get("id"),
+                "subject_name": r.get("subject_name"),
+                "submitted_at": r.get("submitted_at"),
+                "answers": parse_answers(r),
+            }
+        )
+
+    summary_questions = [
+    {
+        "id": q.get("id"),
+        "question_text": q.get("question_text"),
+        "question_type": q.get("question_type"),
+        "order_num": q.get("order_num"),
+    }
+        for q in questions
+    ]
+
+    with st.spinner("Summarizing this survey..."):
+        survey_summary = summarize_survey_responses_with_gemini(
+            link["label"],
+            json.dumps(summary_questions, ensure_ascii=False),
+            json.dumps(summary_payload, ensure_ascii=False),
+        )
+
+    st.markdown(
+        f"""
+        <div style="background:rgba(255,255,255,0.10);border-radius:12px;
+                    padding:16px 18px;margin:18px 0 20px;
+                    border:1px solid rgba(255,255,255,0.18)">
+            <div style="font-size:0.82rem;font-weight:700;color:{ACC};margin-bottom:8px">
+                Gemini Summary
+            </div>
+            <div style="font-size:0.85rem;color:white;line-height:1.6;white-space:pre-wrap">{survey_summary}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
     st.markdown(
