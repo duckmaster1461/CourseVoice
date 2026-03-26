@@ -1650,7 +1650,7 @@ def page_login():
                 st.query_params["admin"] = "1"
                 st.rerun()
             else:
-                st.error("Invalid credentials. Default: admin / admin123")
+                st.error("Invalid credentials.")
 
 # ============================================================================
 # ADMIN HOME
