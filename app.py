@@ -1592,97 +1592,102 @@ def page_admin_home():
 
         st.markdown('<hr style="margin:28px 0 20px">', unsafe_allow_html=True)
 
-        dbg1, dbg2 = st.columns(2)
+        st.markdown(
+            '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
+            "🤖 AI Connection Debug</div>",
+            unsafe_allow_html=True,
+        )
 
-        with dbg1:
-            st.markdown(
-                '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
-                "🤖 AI Connection Debug</div>",
-                unsafe_allow_html=True,
-            )
+        if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
+            with st.spinner("Pinging Gemini…"):
+                online, ms, msg = check_llm_status()
+            st.session_state.llm_status = {"online": online, "ms": ms, "msg": msg}
 
-            if st.button("AI Connection", use_container_width=True, key="llm_check"):
-                with st.spinner("Pinging Gemini…"):
-                    online, ms, msg = check_llm_status()
-                st.session_state.llm_status = {"online": online, "ms": ms, "msg": msg}
+        status = st.session_state.get("llm_status")
+        if status is not None:
+            if status["online"]:
+                st.markdown(
+                    f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
+                    f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                    f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
+                    f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
+                    f'Responded in <strong style="color:white">{status["ms"]} ms</strong>'
+                    f' &nbsp;·&nbsp; Reply: <code>{status["msg"]}</code></div>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
+                    f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                    f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
+                    f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
+                    f'{status["msg"]}</div>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
-            status = st.session_state.get("llm_status")
-            if status is not None:
-                if status["online"]:
-                    st.markdown(
-                        f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
-                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
-                        f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
-                        f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
-                        f'Responded in <strong style="color:white">{status["ms"]} ms</strong>'
-                        f' &nbsp;·&nbsp; Reply: <code>{status["msg"]}</code></div>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
-                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
-                        f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
-                        f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
-                        f'{status["msg"]}</div>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+        st.markdown('<div style="margin-top:18px"></div>', unsafe_allow_html=True)
 
-        with dbg2:
+        st.markdown(
+            '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
+            "🗄️ DB Connection Debug</div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Check DB Connection", use_container_width=True, key="db_check"):
+            with st.spinner("Pinging MongoDB…"):
+                st.session_state.db_status = check_db_status()
+
+        db_status = st.session_state.get("db_status")
+        if db_status is not None:
+            if db_status["online"]:
+                details = db_status["details"]
+                st.markdown(
+                    f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
+                    f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                    f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
+                    f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
+                    f'Responded in <strong style="color:white">{db_status["ms"]} ms</strong>'
+                    f'<br>Database: <strong style="color:white">{details["db_name"] or "—"}</strong>'
+                    f'<br>Collections: <strong style="color:white">{len(details["collections"])}</strong></div>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
+
+                with st.expander("View DB Details", expanded=False):
+                    st.write("Import OK:", details["import_ok"])
+                    st.write("Connected:", details["connected"])
+                    st.write("Init OK:", details["init_ok"])
+                    st.write("Mode:", details["mode"])
+                    st.write("Database:", details["db_name"])
+                    st.write("Collections:", details["collections"])
+                    st.write("Error:", details["error"])
+            else:
+                details = db_status["details"]
+                st.markdown(
+                    f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
+                    f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                    f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
+                    f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
+                    f'{db_status["msg"]}</div>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander("View DB Details", expanded=False):
+                    st.write("Import OK:", details["import_ok"])
+                    st.write("Connected:", details["connected"])
+                    st.write("Init OK:", details["init_ok"])
+                    st.write("Mode:", details["mode"])
+                    st.write("Database:", details["db_name"])
+                    st.write("Collections:", details["collections"])
+                    st.write("Error:", details["error"])
             st.markdown(
                 '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
                 "🗄️ DB Connection Debug</div>",
                 unsafe_allow_html=True,
             )
-
-            if st.button("DB Connection", use_container_width=True, key="db_check"):
-                with st.spinner("Pinging MongoDB…"):
-                    st.session_state.db_status = check_db_status()
-
-            db_status = st.session_state.get("db_status")
-            if db_status is not None:
-                if db_status["online"]:
-                    details = db_status["details"]
-                    st.markdown(
-                        f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
-                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
-                        f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
-                        f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
-                        f'Responded in <strong style="color:white">{db_status["ms"]} ms</strong>'
-                        f'<br>Database: <strong style="color:white">{details["db_name"] or "—"}</strong>'
-                        f'<br>Collections: <strong style="color:white">{len(details["collections"])}</strong></div>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                    with st.expander("View DB Details", expanded=False):
-                        st.write("Import OK:", details["import_ok"])
-                        st.write("Connected:", details["connected"])
-                        st.write("Init OK:", details["init_ok"])
-                        st.write("Mode:", details["mode"])
-                        st.write("Database:", details["db_name"])
-                        st.write("Collections:", details["collections"])
-                        st.write("Error:", details["error"])
-                else:
-                    details = db_status["details"]
-                    st.markdown(
-                        f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
-                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
-                        f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
-                        f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
-                        f'{db_status["msg"]}</div>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                    with st.expander("View DB Details", expanded=False):
-                        st.write("Import OK:", details["import_ok"])
-                        st.write("Connected:", details["connected"])
-                        st.write("Init OK:", details["init_ok"])
-                        st.write("Mode:", details["mode"])
-                        st.write("Database:", details["db_name"])
-                        st.write("Collections:", details["collections"])
-                        st.write("Error:", details["error"])
 
         st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
 
