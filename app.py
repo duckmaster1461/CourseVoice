@@ -149,6 +149,68 @@ def check_db_status():
         }
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def summarize_results_with_gemini(sort_by: str, rows_json: str):
+    try:
+        rows = json.loads(rows_json)
+
+        if sort_by == "semester":
+            lines = []
+            total_responses = 0
+            for row in rows[:10]:
+                cnt = int(row.get("response_count", 0))
+                total_responses += cnt
+                lines.append(f'- {row.get("label", "Unknown")}: {cnt} responses')
+
+            context = "\n".join(lines) if lines else "No semester results found."
+            prompt = f"""You are summarizing course survey results for an admin dashboard.
+
+Create a very short, simple summary in 2-3 bullet points.
+Keep it factual and concise.
+Do not invent missing data.
+
+Current view: semester
+Top semester result rows:
+{context}
+
+Total responses across listed rows: {total_responses}
+
+Return plain text only.
+"""
+        else:
+            lines = []
+            total_responses = 0
+            for row in rows[:10]:
+                cnt = int(row.get("cnt", 0))
+                total_responses += cnt
+                lines.append(f'- {row.get("subject_name", "Unknown")}: {cnt} responses')
+
+            context = "\n".join(lines) if lines else "No subject results found."
+            prompt = f"""You are summarizing course survey results for an admin dashboard.
+
+Create a very short, simple summary in 2-3 bullet points.
+Keep it factual and concise.
+Do not invent missing data.
+
+Current view: subject
+Top subject result rows:
+{context}
+
+Total responses across listed rows: {total_responses}
+
+Return plain text only.
+"""
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+        return response.text.strip()
+
+    except Exception as e:
+        return f"Summary unavailable: {type(e).__name__}: {e}"
+
+
 # ============================================================================
 # STREAMLIT CONFIG
 # ============================================================================
@@ -178,6 +240,7 @@ SESSION_DEFAULTS = {
     "form_errors": [],
     "llm_status": None,
     "db_status": None,
+    "results_summary": None,
     "admin_notice": None,
 }
 
@@ -309,6 +372,7 @@ def clear_runtime_caches():
     get_semester_detail_bundle.clear()
     get_subject_detail_bundle.clear()
     get_link_by_token_cached.clear()
+    summarize_results_with_gemini.clear()
 
 
 MONGO_STATUS = get_mongo_status()
@@ -893,6 +957,7 @@ def logout_admin():
     st.session_state.gen_token = None
     st.session_state.llm_status = None
     st.session_state.db_status = None
+    st.session_state.results_summary = None
     st.session_state.admin_notice = None
     st.query_params.clear()
     st.rerun()
@@ -1004,6 +1069,27 @@ h1,h2,h3,h4,h5,h6 {{ color: {FG}; }}
 .stTextArea > div > div > textarea:focus {{
     border-color: {ACC};
     box-shadow: 0 0 0 1px {ACC}55;
+}}
+
+input[placeholder="Enter the year and semester (e.g., 2025 Semester 1)"] {{
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}}
+input[placeholder="Enter the year and semester (e.g., 2025 Semester 1)"]:focus {{
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}}
+input[placeholder="Enter the year and semester (e.g. 2025 Semester 1)"] {{
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}}
+input[placeholder="Enter the year and semester (e.g. 2025 Semester 1)"]:focus {{
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
 }}
 
 .stSelectbox > div > div {{
@@ -1655,7 +1741,6 @@ def page_admin_home():
                     unsafe_allow_html=True,
                 )
                 st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
-
                 with st.expander("View DB Details", expanded=False):
                     st.write("Import OK:", details["import_ok"])
                     st.write("Connected:", details["connected"])
@@ -1675,6 +1760,7 @@ def page_admin_home():
                     f"</div>",
                     unsafe_allow_html=True,
                 )
+                st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
                 with st.expander("View DB Details", expanded=False):
                     st.write("Import OK:", details["import_ok"])
                     st.write("Connected:", details["connected"])
@@ -1683,11 +1769,6 @@ def page_admin_home():
                     st.write("Database:", details["db_name"])
                     st.write("Collections:", details["collections"])
                     st.write("Error:", details["error"])
-            st.markdown(
-                '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
-                "🗄️ DB Connection Debug</div>",
-                unsafe_allow_html=True,
-            )
 
         st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
 
@@ -1736,7 +1817,7 @@ def page_admin_home():
             st.markdown(
                 f"""
             <div style="background:rgba(0,0,0,0.3);border-radius:10px;padding:14px 18px;
-                        margin-top:12px;border:1px solid rgba(255,215,0,0.3)">
+                        margin-top:12px;border:none">
                 <div style="font-size:0.76rem;color:{ACC};font-weight:600;margin-bottom:8px">
                     ✓ Link generated for <strong>{lbl}</strong>
                 </div>
@@ -1829,6 +1910,35 @@ def page_admin_results():
         if not rows:
             st.info("No survey links yet. Generate one from Admin home.")
             return
+
+        rows_for_summary = [
+            {
+                "label": r.get("label"),
+                "response_count": r.get("response_count", 0),
+            }
+            for r in rows
+        ]
+
+        with st.spinner("Summarizing results..."):
+            summary_text = summarize_results_with_gemini(
+                "semester",
+                json.dumps(rows_for_summary, ensure_ascii=False),
+            )
+
+        st.markdown(
+            f"""
+            <div style="background:rgba(255,255,255,0.10);border-radius:12px;
+                        padding:16px 18px;margin:0 0 20px;
+                        border:1px solid rgba(255,255,255,0.18)">
+                <div style="font-size:0.82rem;font-weight:700;color:{ACC};margin-bottom:8px">
+                    Gemini Summary
+                </div>
+                <div style="font-size:0.85rem;color:white;line-height:1.6;white-space:pre-wrap">{summary_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
             for j, row in enumerate(rows[i:i + 2]):
@@ -1844,6 +1954,35 @@ def page_admin_results():
         if not rows:
             st.info("No responses with subject data yet.")
             return
+
+        rows_for_summary = [
+            {
+                "subject_name": r.get("subject_name"),
+                "cnt": r.get("cnt", 0),
+            }
+            for r in rows
+        ]
+
+        with st.spinner("Summarizing results..."):
+            summary_text = summarize_results_with_gemini(
+                "subject",
+                json.dumps(rows_for_summary, ensure_ascii=False),
+            )
+
+        st.markdown(
+            f"""
+            <div style="background:rgba(255,255,255,0.10);border-radius:12px;
+                        padding:16px 18px;margin:0 0 20px;
+                        border:1px solid rgba(255,255,255,0.18)">
+                <div style="font-size:0.82rem;font-weight:700;color:{ACC};margin-bottom:8px">
+                    Gemini Summary
+                </div>
+                <div style="font-size:0.85rem;color:white;line-height:1.6;white-space:pre-wrap">{summary_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
             for j, row in enumerate(rows[i:i + 2]):
