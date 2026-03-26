@@ -355,11 +355,13 @@ def mongo_available():
 
 
 def clear_runtime_caches():
+    # Only clear functions that are ACTUALLY cached
+
     get_mongo_status.clear()
     mongo_available.clear()
 
     get_admin_by_username.clear()
-    get_link_by_token.clear()
+    get_link_by_token_cached.clear()
     get_active_subjects.clear()
     get_active_questions.clear()
     get_recent_links_with_counts.clear()
@@ -367,9 +369,8 @@ def clear_runtime_caches():
     get_results_index_subject.clear()
     get_semester_detail_bundle.clear()
     get_subject_detail_bundle.clear()
-    get_link_by_token_cached.clear()
-    summarize_survey_responses_with_gemini.clear()
 
+    summarize_survey_responses_with_gemini.clear()
 
 MONGO_STATUS = get_mongo_status()
 MONGO_STATUS_MSG = None if MONGO_STATUS["mode"] == "mongodb" else f"Mongo fallback active. Reason: {MONGO_STATUS['error']}"
