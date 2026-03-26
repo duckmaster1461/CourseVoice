@@ -1208,6 +1208,14 @@ div[data-testid="stRadio"] label > *:last-child p {{
     color: {BTN_FG} !important;
 }}
 
+/* Remove default Streamlit form container outline */
+[data-testid="stForm"] {{
+    border: none !important;
+    padding: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}}
+
 .logout-btn {{ display: flex; justify-content: flex-end; }}
 .logout-btn .stButton > button {{
     border-radius: 30px;
