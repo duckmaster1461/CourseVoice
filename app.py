@@ -1601,7 +1601,7 @@ def page_admin_home():
                 unsafe_allow_html=True,
             )
 
-            if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
+            if st.button("AI Connection", use_container_width=True, key="llm_check"):
                 with st.spinner("Pinging Gemini…"):
                     online, ms, msg = check_llm_status()
                 st.session_state.llm_status = {"online": online, "ms": ms, "msg": msg}
@@ -1637,7 +1637,7 @@ def page_admin_home():
                 unsafe_allow_html=True,
             )
 
-            if st.button("Check DB Connection", use_container_width=True, key="db_check"):
+            if st.button("DB Connection", use_container_width=True, key="db_check"):
                 with st.spinner("Pinging MongoDB…"):
                     st.session_state.db_status = check_db_status()
 
