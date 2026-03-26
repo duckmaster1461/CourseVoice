@@ -89,6 +89,66 @@ def check_llm_status():
         return False, None, str(e)
 
 
+def check_db_status():
+    try:
+        start = time.time()
+
+        if not MONGO_IMPORT_OK:
+            return {
+                "online": False,
+                "ms": None,
+                "msg": MONGO_IMPORT_ERROR or "Mongo imports failed",
+                "details": {
+                    "import_ok": False,
+                    "connected": False,
+                    "init_ok": False,
+                    "mode": "json_fallback",
+                    "db_name": None,
+                    "collections": [],
+                    "error": MONGO_IMPORT_ERROR,
+                },
+            }
+
+        db = get_database()
+        db.command("ping")
+        bootstrap_db()
+
+        elapsed = int((time.time() - start) * 1000)
+
+        details = {
+            "import_ok": True,
+            "connected": True,
+            "init_ok": True,
+            "mode": "mongodb",
+            "db_name": getattr(db, "name", None),
+            "collections": db.list_collection_names(),
+            "error": None,
+        }
+
+        return {
+            "online": True,
+            "ms": elapsed,
+            "msg": "MongoDB connection healthy",
+            "details": details,
+        }
+
+    except Exception as e:
+        return {
+            "online": False,
+            "ms": None,
+            "msg": f"{type(e).__name__}: {e}",
+            "details": {
+                "import_ok": MONGO_IMPORT_OK,
+                "connected": False,
+                "init_ok": False,
+                "mode": "json_fallback",
+                "db_name": None,
+                "collections": [],
+                "error": f"{type(e).__name__}: {e}",
+            },
+        }
+
+
 # ============================================================================
 # STREAMLIT CONFIG
 # ============================================================================
@@ -117,6 +177,7 @@ SESSION_DEFAULTS = {
     "submitted": False,
     "form_errors": [],
     "llm_status": None,
+    "db_status": None,
     "admin_notice": None,
 }
 
@@ -174,11 +235,11 @@ def safe_int(v):
 def bootstrap_db():
     if not MONGO_IMPORT_OK:
         return False
+
     db = get_database()
     db.command("ping")
     init_db()
 
-    # Ensure runtime indexes exist for fast admin pages
     admins_col().create_index("username", unique=True)
 
     subjects_col().create_index([("active", ASCENDING), ("name", ASCENDING)])
@@ -217,11 +278,11 @@ def get_mongo_status():
     try:
         db = get_database()
         db.command("ping")
-        status["connected"] = True
-        status["db_name"] = getattr(db, "name", None)
         bootstrap_db()
+        status["connected"] = True
         status["init_ok"] = True
         status["mode"] = "mongodb"
+        status["db_name"] = getattr(db, "name", None)
         status["collections"] = db.list_collection_names()
         return status
     except Exception as e:
@@ -238,7 +299,6 @@ def clear_runtime_caches():
     get_mongo_status.clear()
     mongo_available.clear()
 
-    # read caches
     get_admin_by_username.clear()
     get_link_by_token.clear()
     get_active_subjects.clear()
@@ -291,7 +351,6 @@ def _load_json():
 
 
 def load_data():
-    # legacy fallback only
     return _load_json()
 
 
@@ -314,7 +373,7 @@ def next_counter_value(name: str) -> int:
     )
     if doc and "seq" in doc:
         return int(doc["seq"])
-    # first-ever creation fallback
+
     seeded = {
         "subjects": 9,
         "questions": 5,
@@ -331,6 +390,7 @@ def get_admin_by_username(username: str):
         bootstrap_db()
         doc = admins_col().find_one({"username": username})
         return normalize_doc(doc)
+
     data = load_data()
     row = next((a for a in data["admins"] if a["username"] == username), None)
     if not row:
@@ -345,6 +405,7 @@ def get_link_by_token_cached(token: str):
     if mongo_available():
         bootstrap_db()
         return normalize_doc(semester_links_col().find_one({"token": token}))
+
     data = load_data()
     row = next((l for l in data["semester_links"] if l["token"] == token), None)
     if not row:
@@ -362,12 +423,14 @@ def get_link_by_token(token: str):
 def get_active_subjects():
     if mongo_available():
         bootstrap_db()
-        docs = subjects_col().find({"active": 1}, {"_id": 1, "id": 1, "name": 1, "active": 1}).sort("name", ASCENDING)
+        docs = subjects_col().find(
+            {"active": 1},
+            {"_id": 1, "id": 1, "name": 1, "active": 1},
+        ).sort("name", ASCENDING)
         return normalize_docs(list(docs))
 
     data = load_data()
-    rows = [dict(s, mongo_oid=None) for s in sorted(data["subjects"], key=lambda x: x["name"]) if s["active"]]
-    return rows
+    return [dict(s, mongo_oid=None) for s in sorted(data["subjects"], key=lambda x: x["name"]) if s["active"]]
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -376,20 +439,26 @@ def get_active_questions():
         bootstrap_db()
         docs = questions_col().find(
             {"active": 1},
-            {"_id": 1, "id": 1, "question_text": 1, "question_type": 1, "order_num": 1, "active": 1, "ai_moderated": 1},
+            {
+                "_id": 1,
+                "id": 1,
+                "question_text": 1,
+                "question_type": 1,
+                "order_num": 1,
+                "active": 1,
+                "ai_moderated": 1,
+            },
         ).sort("order_num", ASCENDING)
         return normalize_docs(list(docs))
 
     data = load_data()
-    rows = [dict(q, mongo_oid=None) for q in sorted(data["questions"], key=lambda x: x["order_num"]) if q["active"]]
-    return rows
+    return [dict(q, mongo_oid=None) for q in sorted(data["questions"], key=lambda x: x["order_num"]) if q["active"]]
 
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_recent_links_with_counts(limit: int = 6):
     if mongo_available():
         bootstrap_db()
-
         pipeline = [
             {
                 "$lookup": {
@@ -510,7 +579,15 @@ def get_semester_detail_bundle(link_id: int):
             list(
                 questions_col().find(
                     {"active": 1},
-                    {"_id": 1, "id": 1, "question_text": 1, "question_type": 1, "order_num": 1, "ai_moderated": 1, "active": 1},
+                    {
+                        "_id": 1,
+                        "id": 1,
+                        "question_text": 1,
+                        "question_type": 1,
+                        "order_num": 1,
+                        "ai_moderated": 1,
+                        "active": 1,
+                    },
                 ).sort("order_num", ASCENDING)
             )
         )
@@ -530,7 +607,14 @@ def get_semester_detail_bundle(link_id: int):
     if link:
         link = dict(link, mongo_oid=None)
     questions = [dict(q, mongo_oid=None) for q in sorted(data["questions"], key=lambda x: x["order_num"])]
-    responses = [dict(r, mongo_oid=None) for r in sorted([r for r in data["responses"] if r["link_id"] == link_id], key=lambda x: x["submitted_at"], reverse=True)]
+    responses = [
+        dict(r, mongo_oid=None)
+        for r in sorted(
+            [r for r in data["responses"] if r["link_id"] == link_id],
+            key=lambda x: x["submitted_at"],
+            reverse=True,
+        )
+    ]
     return link, questions, responses
 
 
@@ -543,7 +627,15 @@ def get_subject_detail_bundle(subject_name: str):
             list(
                 questions_col().find(
                     {"active": 1},
-                    {"_id": 1, "id": 1, "question_text": 1, "question_type": 1, "order_num": 1, "ai_moderated": 1, "active": 1},
+                    {
+                        "_id": 1,
+                        "id": 1,
+                        "question_text": 1,
+                        "question_type": 1,
+                        "order_num": 1,
+                        "ai_moderated": 1,
+                        "active": 1,
+                    },
                 ).sort("order_num", ASCENDING)
             )
         )
@@ -572,7 +664,14 @@ def get_subject_detail_bundle(subject_name: str):
     data = load_data()
     questions = [dict(q, mongo_oid=None) for q in sorted(data["questions"], key=lambda x: x["order_num"])]
     link_map = {l["id"]: dict(l, mongo_oid=None) for l in data["semester_links"]}
-    responses = [dict(r, mongo_oid=None) for r in sorted([r for r in data["responses"] if r.get("subject_name") == subject_name], key=lambda x: x["submitted_at"], reverse=True)]
+    responses = [
+        dict(r, mongo_oid=None)
+        for r in sorted(
+            [r for r in data["responses"] if r.get("subject_name") == subject_name],
+            key=lambda x: x["submitted_at"],
+            reverse=True,
+        )
+    ]
     return questions, link_map, responses
 
 
@@ -793,6 +892,7 @@ def logout_admin():
     st.session_state.drill_subject = None
     st.session_state.gen_token = None
     st.session_state.llm_status = None
+    st.session_state.db_status = None
     st.session_state.admin_notice = None
     st.query_params.clear()
     st.rerun()
@@ -815,7 +915,6 @@ if IS_ADMIN:
     BDR = "rgba(255,215,0,0.85)"
     MUTED = "rgba(255,255,255,0.55)"
     CARD = "rgba(255,255,255,0.13)"
-    CARD2 = "rgba(255,255,255,0.08)"
 elif DARK:
     BG = "#242424"
     FG = "#e2e2e2"
@@ -823,7 +922,6 @@ elif DARK:
     BDR = ACC
     MUTED = "#888888"
     CARD = "#2c2c2c"
-    CARD2 = "#262626"
 else:
     BG = "#e8e4d8"
     FG = "#1a1a1a"
@@ -831,7 +929,6 @@ else:
     BDR = "#1a1a1a"
     MUTED = "#777777"
     CARD = "#ffffff"
-    CARD2 = "#f5f1e8"
 
 if IS_ADMIN:
     BTN_BG = "transparent"
@@ -854,6 +951,22 @@ st.markdown(
 *, *::before, *::after, html, body, .stApp, [class*="css"] {{ box-sizing: border-box; }}
 *, html, body, [class*="css"] {{ font-family: 'Sora', sans-serif; }}
 
+div[data-testid="stHorizontalBlock"] {{ align-items: center; }}
+
+.stButton {{ display: flex; justify-content: center; width: 100%; }}
+.stButton > button {{ width: auto; min-width: unset; }}
+
+.stTextInput > div,
+.stTextInput > div > div {{ border-radius: 12px; overflow: hidden; }}
+.stSelectbox > div,
+.stSelectbox > div > div {{ border-radius: 12px; overflow: hidden; }}
+
+.stTextInput [data-testid="stWidgetLabel"],
+.stSelectbox [data-testid="stWidgetLabel"],
+.stTextArea [data-testid="stWidgetLabel"] {{
+    display: none; min-height: 0; height: 0; margin: 0; padding: 0;
+}}
+
 html, body, .stApp,
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"],
@@ -861,32 +974,16 @@ section[data-testid="stMainBlockContainer"] {{ background-color: {BG}; }}
 
 .block-container {{
     background: transparent;
-    padding: 1.2rem 2rem 2rem 2rem;
-    max-width: 1040px;
+    padding: 1.4rem 2.2rem;
+    max-width: 900px;
     margin: 0 auto;
 }}
 
-#MainMenu, footer, header, [data-testid="stToolbar"], div[data-testid="stDecoration"] {{
-    visibility: hidden; display: none;
-}}
+#MainMenu, footer, header, [data-testid="stToolbar"],
+div[data-testid="stDecoration"] {{ visibility: hidden; display: none; }}
 
 p, span, div, label, li {{ color: {FG}; }}
 h1,h2,h3,h4,h5,h6 {{ color: {FG}; }}
-
-.stButton {{ display:flex; justify-content:center; width:100%; }}
-.stButton > button {{
-    background: transparent;
-    color: {ACC};
-    border: 2.5px solid {ACC};
-    border-radius: 30px;
-    padding: 11px 28px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    font-size: 0.82rem;
-    transition: all .15s;
-}}
-.stButton > button:hover {{ background: {ACC}; color: #111; transform: translateY(-1px); }}
 
 .stTextInput > div > div > input,
 .stTextArea > div > div > textarea {{
@@ -894,174 +991,311 @@ h1,h2,h3,h4,h5,h6 {{ color: {FG}; }}
     color: {FG};
     border: 2px solid {BDR};
     border-radius: 12px;
-    padding: 10px 18px;
+    padding: 10px 22px;
+    font-family: 'Sora', sans-serif;
+    font-size: 0.88rem;
+    box-shadow: none;
+    outline: none;
+    background-clip: padding-box;
 }}
+.stTextInput > div > div > input::placeholder,
+.stTextArea > div > div > textarea::placeholder {{ color: {MUTED}; opacity: 1; }}
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus {{
+    border-color: {ACC};
+    box-shadow: 0 0 0 1px {ACC}55;
+}}
+
 .stSelectbox > div > div {{
     background: {INP};
     color: {FG};
     border: 2px solid {BDR};
     border-radius: 12px;
+    box-shadow: none;
+    background-clip: padding-box;
 }}
 .stSelectbox > div > div > div {{ color: {FG}; }}
-.stTextInput [data-testid="stWidgetLabel"],
-.stSelectbox [data-testid="stWidgetLabel"],
-.stTextArea [data-testid="stWidgetLabel"] {{
-    display: none; min-height: 0; height: 0; margin: 0; padding: 0;
-}}
+.stSelectbox > div > div svg {{ fill: {FG}; }}
 
-div[data-baseweb="popover"], div[data-baseweb="popover"] ul, div[data-baseweb="popover"] li {{
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] ul,
+div[data-baseweb="popover"] li {{
     background: {INP} !important;
     color: {FG} !important;
 }}
+div[data-baseweb="popover"] li:hover {{
+    background: {BDR} !important;
+    color: #111 !important;
+}}
+div[data-baseweb="popover"] li[aria-selected="true"] {{
+    background: {ACC} !important;
+    color: #111 !important;
+}}
 
-div[data-testid="stRadio"] > label {{ display:none; }}
+div[data-testid="stRadio"] > label {{ display: none; }}
 div[data-testid="stRadio"] [data-testid="stWidgetLabel"] {{
-    display:none; height:0; margin:0; padding:0; min-height:0;
+    display: none; height: 0; margin: 0; padding: 0; min-height: 0;
 }}
 div[data-testid="stRadio"] > div {{
-    flex-direction:row; flex-wrap:wrap; gap:10px; align-items:center;
+    flex-direction: row; flex-wrap: wrap; gap: 10px; align-items: center;
 }}
 div[data-testid="stRadio"] label {{
-    border:2px solid {BDR};
-    border-radius:50px;
-    min-width:48px;
-    height:48px;
-    padding:0 18px;
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    cursor:pointer;
-    background:{RADIO_BG};
-    color:#fff;
-    font-weight:600;
+    border: 2px solid {BDR};
+    border-radius: 50px;
+    min-width: 48px;
+    height: 48px;
+    padding: 0 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    background: {RADIO_BG};
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    margin: 0;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+    box-sizing: border-box;
+    overflow: hidden;
+    position: relative;
+    background-clip: padding-box;
+    -webkit-background-clip: padding-box;
+    z-index: 0;
 }}
-div[data-testid="stRadio"] label:hover {{ background:{BDR}; color:#111; }}
+div[data-testid="stRadio"] label:hover {{ background: {BDR}; color: #1a1a1a; }}
 div[data-testid="stRadio"] label:has(input:checked) {{
-    background:{ACC} !important;
-    color:#111 !important;
-    border-color:{ACC} !important;
+    background: {ACC} !important;
+    color: #111 !important;
+    border-color: {ACC} !important;
 }}
 div[data-testid="stRadio"] label > *:not(:last-child) {{
-    display:none; width:0; height:0; position:absolute; visibility:hidden;
+    display: none; width: 0; height: 0; position: absolute;
+    visibility: hidden; overflow: hidden; pointer-events: none;
+}}
+div[data-testid="stRadio"] label > *:last-child {{
+    display: flex; align-items: center; justify-content: center; margin: 0; padding: 0;
 }}
 div[data-testid="stRadio"] label > *:last-child p {{
-    margin:0; color:inherit; font-size:inherit; font-weight:inherit;
+    margin: 0; color: inherit; font-size: inherit; font-weight: inherit;
 }}
+
+.stButton > button {{
+    background: transparent;
+    overflow: visible;
+    color: {ACC};
+    border: 2.5px solid {ACC};
+    border-radius: 30px;
+    padding: 11px 32px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-size: 0.82rem;
+    font-family: 'Sora', sans-serif;
+    transition: all 0.17s;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
+}}
+.stButton > button:hover {{ background: {ACC}; color: #111; transform: translateY(-1px); }}
 
 [data-testid="stForm"] [data-testid="stFormSubmitButton"] > button {{
     background: {BTN_BG} !important;
     color: {BTN_FG} !important;
     border: 2px solid {BDR} !important;
-    border-radius: 10px !important;
-    padding: 14px 34px !important;
+    border-radius: 8px !important;
+    padding: 14px 40px !important;
+    letter-spacing: 2px !important;
+    font-size: 0.88rem !important;
     width: 100% !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box !important;
+}}
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button p,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button span,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] > button div {{
+    color: {BTN_FG} !important;
 }}
 
-.logout-btn {{ display:flex; justify-content:flex-end; }}
+.logout-btn {{ display: flex; justify-content: flex-end; }}
 .logout-btn .stButton > button {{
-    border-radius: 30px; padding: 9px 22px; min-width: 100px;
+    border-radius: 30px;
+    padding: 9px 22px;
+    letter-spacing: 0.5px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    min-width: 100px;
+    width: auto;
+    height: auto;
+    text-transform: uppercase;
+    font-weight: 700;
+    word-break: keep-all;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
 
 .back-btn .stButton > button {{
     border-radius: 30px;
-    padding: 8px 20px;
-    font-size: .8rem;
+    padding: 8px 22px;
+    font-size: 0.82rem;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
 }}
 
 .pill-btn .stButton > button {{
-    border-radius: 14px;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 0.82rem;
+    padding: 14px 20px;
     width: 100%;
-    padding: 15px 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
 }}
+.pill-btn .stButton > button:hover {{ background: {ACC}; color: #111; }}
 
 .admin-action .stButton > button {{
     border-radius: 40px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 0.88rem;
     padding: 18px 40px;
     width: 100%;
 }}
 
-.save-btn .stButton > button {{
-    background: rgba(20,35,80,0.45);
-    color: white;
-    border: 1.5px solid rgba(255,255,255,0.35);
-    border-radius: 10px;
-    text-transform:none;
-    letter-spacing:0;
+.rem-btn {{ display: flex; justify-content: center; }}
+.rem-btn .stButton {{ max-width: 42px; width: 42px; }}
+.rem-btn .stButton > button {{
+    background: transparent;
+    color: {ACC};
+    border: 2px solid {ACC};
+    border-radius: 50%;
+    width: 38px; height: 38px; min-width: 38px; max-width: 38px;
+    padding: 0;
+    font-size: 1.3rem;
+    line-height: 38px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 300;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
-.save-btn .stButton > button:hover {{
-    background: rgba(10,20,60,0.82);
-    color:white;
-    transform:none;
+.rem-btn .stButton > button:hover {{
+    background: #e74c3c; border-color: #e74c3c; color: white; transform: none;
 }}
 
-.add-btn .stButton > button, .rem-btn .stButton > button, .arrow-btn .stButton > button {{
-    border-radius:50%;
-    min-width:42px;
-    width:42px;
-    height:42px;
-    padding:0;
-    line-height:42px;
-    letter-spacing:0;
-    text-transform:none;
+.add-btn {{ display: flex; justify-content: center; }}
+.add-btn .stButton {{ max-width: 42px; width: 42px; }}
+.add-btn .stButton > button {{
+    background: transparent;
+    color: {ACC};
+    border: 2px solid {ACC};
+    border-radius: 50%;
+    width: 38px; height: 38px; min-width: 38px; max-width: 38px;
+    padding: 0;
+    font-size: 1.3rem;
+    line-height: 38px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 300;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
+}}
+.add-btn .stButton > button:hover {{
+    background: #27ae60; border-color: #27ae60; color: white; transform: none;
+}}
+
+.save-btn .stButton > button {{
+    background: rgba(20,35,80,0.5);
+    color: white;
+    border: 1.5px solid rgba(255,255,255,0.4);
+    border-radius: 10px;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 10px 28px;
+    font-size: 0.88rem;
+}}
+.save-btn .stButton > button:hover {{ background: rgba(10,20,60,0.8); color: white; transform: none; }}
+
+.arrow-btn .stButton > button {{
+    border-radius: 50%;
+    min-width: 50px; width: 50px; height: 50px;
+    padding: 0;
+    font-size: 1.3rem;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 400;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
 
 div[data-testid="stMetric"] {{
     background: {CARD};
-    border-radius: 14px;
+    border-radius: 12px;
     padding: 18px;
-    border: 1px solid rgba(255,255,255,.18);
+    border: 1px solid rgba(255,255,255,0.2);
 }}
-div[data-testid="stMetricValue"] {{ color:{FG}; font-size:1.55rem; }}
-div[data-testid="stMetricLabel"] {{ color:{MUTED}; font-size:.78rem; }}
+div[data-testid="stMetricValue"] {{ color: {FG}; font-size: 1.6rem; }}
+div[data-testid="stMetricLabel"] {{ color: {MUTED}; font-size: 0.78rem; }}
 
 .stExpander {{
-    background:{CARD};
-    border:1px solid rgba(255,255,255,.18);
-    border-radius:14px;
-    overflow:hidden;
+    background: {CARD};
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 10px;
+    overflow: hidden;
+}}
+.stExpander summary {{ color: {FG}; }}
+.stExpander summary > div > div > p {{ color: {FG}; }}
+details > summary > span {{ display: none; }}
+details > summary > div {{ color: {FG}; }}
+
+div[data-testid="stDataFrame"] {{
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.15);
 }}
 
-hr {{ border-color: rgba(255,255,255,0.18); }}
+div[data-testid="stToggle"] label span {{ color: {FG}; }}
 
-.admin-card {{
-    background:{CARD};
-    border:1px solid rgba(255,255,255,.18);
-    border-radius:16px;
-    padding:18px 20px;
+.stDownloadButton > button {{
+    background: transparent;
+    color: {ACC};
+    border: 2px solid {ACC};
+    border-radius: 30px;
+    padding: 10px 28px;
+    font-size: 0.82rem;
+    font-family: 'Sora', sans-serif;
+    font-weight: 600;
+    letter-spacing: 1px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background-clip: padding-box;
 }}
-.admin-subcard {{
-    background:{CARD2};
-    border:1px solid rgba(255,255,255,.14);
-    border-radius:14px;
-    padding:14px 16px;
-}}
-.meta {{
-    font-size:.74rem;
-    color:rgba(255,255,255,.62);
-    line-height:1.6;
-}}
-.title-xl {{
-    text-align:center;
-    font-size:2.6rem;
-    font-weight:800;
-    color:white;
-    letter-spacing:-1px;
-    margin:0 0 28px;
-}}
-.title-lg {{
-    text-align:center;
-    font-size:2rem;
-    font-weight:800;
-    color:white;
-    letter-spacing:-.5px;
-    margin:0 0 24px;
-}}
-.title-md {{
-    font-size:1rem;
-    font-weight:700;
-    color:white;
-    margin-bottom:12px;
-}}
+.stDownloadButton > button:hover {{ background: {ACC}; color: #111; }}
+
+hr {{ border-color: rgba(255,255,255,0.2); }}
+code {{ background: rgba(0,0,0,0.3); color: {ACC}; border-radius: 6px; padding: 2px 8px; }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -1073,15 +1307,13 @@ hr {{ border-color: rgba(255,255,255,0.18); }}
 
 
 def render_admin_header():
-    c1, c2, c3 = st.columns([4, 2, 2])
+    c1, _, c3 = st.columns([4, 3, 2])
     with c1:
         st.markdown(
-            f'<div class="meta">Logged in as <strong style="color:white">{st.session_state.admin_user}</strong></div>',
+            f'<div style="font-size:0.8rem;color:rgba(255,255,255,0.6)">'
+            f'Logged in as <strong style="color:white">{st.session_state.admin_user}</strong></div>',
             unsafe_allow_html=True,
         )
-    with c2:
-        status = "MongoDB" if mongo_available() else "JSON Fallback"
-        st.markdown(f'<div class="meta">Storage: <strong style="color:white">{status}</strong></div>', unsafe_allow_html=True)
     with c3:
         st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
         if st.button("Logout", key="logout_btn"):
@@ -1115,12 +1347,11 @@ def page_student(token):
         with cc:
             st.markdown(
                 f"""
-                <div style="text-align:center;padding:100px 0">
-                    <div style="font-size:3rem;margin-bottom:16px">🎉</div>
-                    <div style="font-size:1.8rem;font-weight:700;color:{FG}">Thank you!</div>
-                    <div style="font-size:0.9rem;color:{MUTED}">Your feedback has been recorded anonymously.</div>
-                </div>
-                """,
+            <div style="text-align:center;padding:100px 0">
+                <div style="font-size:3rem;margin-bottom:16px">🎉</div>
+                <div style="font-size:1.8rem;font-weight:700;color:{FG}">Thank you!</div>
+                <div style="font-size:0.9rem;color:{MUTED}">Your feedback has been recorded anonymously.</div>
+            </div>""",
                 unsafe_allow_html=True,
             )
         _, bc, _ = st.columns([1, 4, 1])
@@ -1132,12 +1363,12 @@ def page_student(token):
 
     st.markdown(
         f"""
-        <div style="text-align:center;padding:18px 0 28px">
-            <div style="font-size:0.68rem;letter-spacing:3.5px;text-transform:uppercase;color:{MUTED};margin-bottom:10px;font-weight:600">{link['label']}</div>
-            <div style="font-size:2.2rem;font-weight:800;color:{FG};letter-spacing:-0.5px">Course Feedback</div>
-            <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">🔒 All responses are 100% anonymous</div>
-        </div>
-        """,
+    <div style="text-align:center;padding:18px 0 28px">
+        <div style="font-size:0.68rem;letter-spacing:3.5px;text-transform:uppercase;
+                    color:{MUTED};margin-bottom:10px;font-weight:600">{link['label']}</div>
+        <div style="font-size:2.2rem;font-weight:800;color:{FG};letter-spacing:-0.5px">Course Feedback</div>
+        <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">🔒 All responses are 100% anonymous</div>
+    </div>""",
         unsafe_allow_html=True,
     )
 
@@ -1145,17 +1376,23 @@ def page_student(token):
         for e in st.session_state.form_errors:
             if isinstance(e, dict):
                 st.markdown(
-                    f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">⚠️ {e["msg"]}</div>',
+                    f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;'
+                    f'padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">'
+                    f'⚠️ {e["msg"]}</div>',
                     unsafe_allow_html=True,
                 )
                 if e.get("tip"):
                     st.markdown(
-                        f'<div style="background:#1a2f4a;border:1px solid #3a7bd5;border-radius:8px;padding:12px 16px;margin:4px 0 8px;color:#7eb8f7;font-size:0.88rem">💡 Tip: {e["tip"]}</div>',
+                        f'<div style="background:#1a2f4a;border:1px solid #3a7bd5;border-radius:8px;'
+                        f'padding:12px 16px;margin:4px 0 8px;color:#7eb8f7;font-size:0.88rem">'
+                        f'💡 Tip: {e["tip"]}</div>',
                         unsafe_allow_html=True,
                     )
             else:
                 st.markdown(
-                    f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">⚠️ {e}</div>',
+                    f'<div style="background:#5c1a1a;border:1px solid #e74c3c;border-radius:8px;'
+                    f'padding:12px 16px;margin:8px 0;color:#ff6b6b;font-size:0.88rem">'
+                    f'⚠️ {e}</div>',
                     unsafe_allow_html=True,
                 )
         st.session_state.form_errors = []
@@ -1167,22 +1404,45 @@ def page_student(token):
                     '<hr style="border:none;border-top:1px solid rgba(128,128,128,0.25);margin:20px 0">',
                     unsafe_allow_html=True,
                 )
-
             st.markdown(
-                f'<div style="font-size:0.9rem;color:{FG};margin-bottom:12px;font-weight:400">{q["question_text"]}</div>',
+                f'<div style="font-size:0.9rem;color:{FG};margin-bottom:12px;font-weight:400">'
+                f'{q["question_text"]}</div>',
                 unsafe_allow_html=True,
             )
 
             qt, qid = q["question_type"], q["id"]
-
             if qt == "dropdown":
-                st.selectbox(" ", ["— Select a subject —"] + subjects, label_visibility="collapsed", key=f"q{qid}")
+                st.selectbox(
+                    " ",
+                    ["— Select a subject —"] + subjects,
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
             elif qt == "text":
-                st.text_input(" ", placeholder="Type your answer here…", label_visibility="collapsed", key=f"q{qid}")
+                st.text_input(
+                    " ",
+                    placeholder="Type your answer here…",
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
             elif qt == "rating":
-                st.radio(" ", [1, 2, 3, 4, 5], index=None, horizontal=True, label_visibility="collapsed", key=f"q{qid}")
+                st.radio(
+                    " ",
+                    [1, 2, 3, 4, 5],
+                    index=None,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
             elif qt == "yes_no":
-                st.radio(" ", ["Yes", "No"], index=None, horizontal=True, label_visibility="collapsed", key=f"q{qid}")
+                st.radio(
+                    " ",
+                    ["Yes", "No"],
+                    index=None,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"q{qid}",
+                )
 
         st.markdown("<br>", unsafe_allow_html=True)
         go = st.form_submit_button("SUBMIT", use_container_width=True)
@@ -1202,9 +1462,17 @@ def page_student(token):
                         errors.append(f'"{q["question_text"]}" cannot be empty.')
                     elif q.get("ai_moderated", 0):
                         with st.spinner("Checking your answer…"):
-                            acceptable, reason, tip = moderate_answer(q["question_text"], str(v).strip())
+                            acceptable, reason, tip = moderate_answer(
+                                q["question_text"],
+                                str(v).strip(),
+                            )
                         if not acceptable:
-                            errors.append({"msg": f"Please revise your answer: {reason}", "tip": tip})
+                            errors.append(
+                                {
+                                    "msg": f"Please revise your answer: {reason}",
+                                    "tip": tip,
+                                }
+                            )
                 elif q["question_type"] in ("rating", "yes_no") and v is None:
                     errors.append(f'Please answer: "{q["question_text"]}"')
 
@@ -1236,13 +1504,12 @@ def page_landing():
     with col:
         st.markdown(
             f"""
-            <div style="text-align:center;padding:80px 0 40px">
-                <div style="font-size:3rem;font-weight:800;color:{FG};letter-spacing:-2px">CourseVoice</div>
-                <div style="font-size:0.92rem;color:{MUTED};margin-top:10px;margin-bottom:44px">
-                    Anonymous course feedback platform
-                </div>
+        <div style="text-align:center;padding:80px 0 40px">
+            <div style="font-size:3rem;font-weight:800;color:{FG};letter-spacing:-2px">CourseVoice</div>
+            <div style="font-size:0.92rem;color:{MUTED};margin-top:10px;margin-bottom:44px">
+                Anonymous course feedback platform
             </div>
-            """,
+        </div>""",
             unsafe_allow_html=True,
         )
 
@@ -1254,10 +1521,9 @@ def page_landing():
 
         st.markdown(
             f"""
-            <div style="text-align:center;margin-top:32px;font-size:0.85rem;color:{MUTED}">
-                Are you a student? Use the survey link your instructor shared with you.
-            </div>
-            """,
+        <div style="text-align:center;margin-top:32px;font-size:0.85rem;color:{MUTED}">
+            Are you a student? Use the survey link your instructor shared with you.
+        </div>""",
             unsafe_allow_html=True,
         )
 
@@ -1271,11 +1537,10 @@ def page_login():
     with col:
         st.markdown(
             """
-            <div style="text-align:center;padding:70px 0 36px">
-                <div style="font-size:2.7rem;font-weight:800;color:white;letter-spacing:-1.5px">CourseVoice</div>
-                <div style="font-size:0.9rem;color:rgba(255,255,255,0.6);margin-top:8px">Admin Portal</div>
-            </div>
-            """,
+        <div style="text-align:center;padding:70px 0 36px">
+            <div style="font-size:2.6rem;font-weight:800;color:white;letter-spacing:-1.5px">CourseVoice</div>
+            <div style="font-size:0.88rem;color:rgba(255,255,255,0.6);margin-top:8px">Admin Portal</div>
+        </div>""",
             unsafe_allow_html=True,
         )
 
@@ -1308,75 +1573,127 @@ def page_admin_home():
     if MONGO_STATUS_MSG:
         st.warning(MONGO_STATUS_MSG)
 
-    with st.expander("MongoDB Debug Status", expanded=False):
-        status = get_mongo_status()
-        st.write("Import OK:", status["import_ok"])
-        st.write("Connected:", status["connected"])
-        st.write("Init OK:", status["init_ok"])
-        st.write("Mode:", status["mode"])
-        st.write("Database:", status["db_name"])
-        st.write("Collections:", status["collections"])
-        st.write("Error:", status["error"])
+    st.markdown(
+        """
+    <div style="text-align:center;font-size:2.8rem;font-weight:800;color:white;
+                letter-spacing:-1px;margin:0 0 36px">ADMIN VIEW</div>""",
+        unsafe_allow_html=True,
+    )
 
-    st.markdown('<div class="title-xl">ADMIN VIEW</div>', unsafe_allow_html=True)
-
-    top_left, top_right = st.columns([1.2, 1])
-    with top_left:
-        st.markdown('<div class="admin-card">', unsafe_allow_html=True)
-        st.markdown('<div class="title-md" style="text-align:center">Navigation</div>', unsafe_allow_html=True)
+    _, col, _ = st.columns([1, 3, 1])
+    with col:
         st.markdown('<div class="admin-action">', unsafe_allow_html=True)
         if st.button("VIEW SURVEY RESULTS", use_container_width=True, key="go_results"):
             go_admin("results")
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("ADD/EDIT SURVEY QUESTIONS", use_container_width=True, key="go_edit"):
             go_admin("edit")
-        st.markdown("</div></div>", unsafe_allow_html=True)
-
-    with top_right:
-        st.markdown('<div class="admin-card">', unsafe_allow_html=True)
-        st.markdown('<div class="title-md" style="text-align:center">🤖 AI Moderation Status</div>', unsafe_allow_html=True)
-        if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
-            with st.spinner("Pinging Gemini…"):
-                online, ms, msg = check_llm_status()
-            st.session_state.llm_status = {"online": online, "ms": ms, "msg": msg}
-
-        status = st.session_state.get("llm_status")
-        if status is None:
-            st.markdown('<div class="meta" style="text-align:center;margin-top:12px">Not checked yet.</div>', unsafe_allow_html=True)
-        elif status["online"]:
-            st.markdown(
-                f"""
-                <div class="admin-subcard" style="margin-top:10px;text-align:center">
-                    <div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>
-                    <div class="meta">Responded in <strong style="color:white">{status["ms"]} ms</strong> · Reply: <code>{status["msg"]}</code></div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"""
-                <div class="admin-subcard" style="margin-top:10px;text-align:center;border-color:#e74c3c">
-                    <div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>
-                    <div class="meta">{status["msg"]}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<hr style="margin:28px 0 20px">', unsafe_allow_html=True)
 
-    left, right = st.columns([1.2, 1])
-    with left:
-        st.markdown('<div class="admin-card">', unsafe_allow_html=True)
+        dbg1, dbg2 = st.columns(2)
+
+        with dbg1:
+            st.markdown(
+                '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
+                "🤖 AI Connection Debug</div>",
+                unsafe_allow_html=True,
+            )
+
+            if st.button("Check AI Connection", use_container_width=True, key="llm_check"):
+                with st.spinner("Pinging Gemini…"):
+                    online, ms, msg = check_llm_status()
+                st.session_state.llm_status = {"online": online, "ms": ms, "msg": msg}
+
+            status = st.session_state.get("llm_status")
+            if status is not None:
+                if status["online"]:
+                    st.markdown(
+                        f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
+                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                        f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
+                        f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
+                        f'Responded in <strong style="color:white">{status["ms"]} ms</strong>'
+                        f' &nbsp;·&nbsp; Reply: <code>{status["msg"]}</code></div>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
+                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                        f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
+                        f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
+                        f'{status["msg"]}</div>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        with dbg2:
+            st.markdown(
+                '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:12px;text-align:center">'
+                "🗄️ DB Connection Debug</div>",
+                unsafe_allow_html=True,
+            )
+
+            if st.button("Check DB Connection", use_container_width=True, key="db_check"):
+                with st.spinner("Pinging MongoDB…"):
+                    st.session_state.db_status = check_db_status()
+
+            db_status = st.session_state.get("db_status")
+            if db_status is not None:
+                if db_status["online"]:
+                    details = db_status["details"]
+                    st.markdown(
+                        f'<div style="background:rgba(39,174,96,0.18);border:1px solid #27ae60;'
+                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                        f'<div style="font-size:1.1rem;color:#2ecc71;font-weight:700">✅ Online</div>'
+                        f'<div style="font-size:0.78rem;color:rgba(255,255,255,0.6);margin-top:4px">'
+                        f'Responded in <strong style="color:white">{db_status["ms"]} ms</strong>'
+                        f'<br>Database: <strong style="color:white">{details["db_name"] or "—"}</strong>'
+                        f'<br>Collections: <strong style="color:white">{len(details["collections"])}</strong></div>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    with st.expander("View DB Details", expanded=False):
+                        st.write("Import OK:", details["import_ok"])
+                        st.write("Connected:", details["connected"])
+                        st.write("Init OK:", details["init_ok"])
+                        st.write("Mode:", details["mode"])
+                        st.write("Database:", details["db_name"])
+                        st.write("Collections:", details["collections"])
+                        st.write("Error:", details["error"])
+                else:
+                    details = db_status["details"]
+                    st.markdown(
+                        f'<div style="background:rgba(92,26,26,0.6);border:1px solid #e74c3c;'
+                        f'border-radius:10px;padding:14px 18px;margin-top:10px;text-align:center">'
+                        f'<div style="font-size:1.1rem;color:#ff6b6b;font-weight:700">❌ Offline</div>'
+                        f'<div style="font-size:0.78rem;color:rgba(255,100,100,0.8);margin-top:4px">'
+                        f'{db_status["msg"]}</div>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    with st.expander("View DB Details", expanded=False):
+                        st.write("Import OK:", details["import_ok"])
+                        st.write("Connected:", details["connected"])
+                        st.write("Init OK:", details["init_ok"])
+                        st.write("Mode:", details["mode"])
+                        st.write("Database:", details["db_name"])
+                        st.write("Collections:", details["collections"])
+                        st.write("Error:", details["error"])
+
+        st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
+
         st.markdown(
             """
-            <div style="text-align:center;margin:0 0 8px">
-                <div style="font-size:1.15rem;font-weight:700;color:white">Generate new survey link</div>
-                <div class="meta">Editing questions does not affect already-generated links</div>
+        <div style="text-align:center;margin:0 0 4px">
+            <div style="font-size:1.15rem;font-weight:700;color:white">Generate new survey link</div>
+            <div style="font-size:0.74rem;color:rgba(255,255,255,0.5);margin-top:6px">
+                Note: editing questions does not affect already-generated links
             </div>
-            """,
+        </div>""",
             unsafe_allow_html=True,
         )
 
@@ -1413,39 +1730,43 @@ def page_admin_home():
             tok = st.session_state.gen_token
             st.markdown(
                 f"""
-                <div class="admin-subcard" style="margin-top:12px">
-                    <div style="font-size:.8rem;color:{ACC};font-weight:600;margin-bottom:8px">✓ Link generated for <strong>{lbl}</strong></div>
-                    <div class="meta">Share this URL with students:</div>
+            <div style="background:rgba(0,0,0,0.3);border-radius:10px;padding:14px 18px;
+                        margin-top:12px;border:1px solid rgba(255,215,0,0.3)">
+                <div style="font-size:0.76rem;color:{ACC};font-weight:600;margin-bottom:8px">
+                    ✓ Link generated for <strong>{lbl}</strong>
                 </div>
-                """,
+                <div style="font-size:0.8rem;color:rgba(255,255,255,0.7)">Share this URL with students:</div>
+            </div>""",
                 unsafe_allow_html=True,
             )
             st.code(f"https://sxptkiopucmjsnzgpv4ekh.streamlit.app/?token={tok}")
-        st.markdown("</div>", unsafe_allow_html=True)
 
-    with right:
-        recent = get_recent_links_with_counts(limit=4)
+    st.markdown('<hr style="margin:32px 0 20px">', unsafe_allow_html=True)
+    recent = get_recent_links_with_counts(limit=6)
 
-        st.markdown('<div class="admin-card">', unsafe_allow_html=True)
-        st.markdown('<div class="title-md">Recent survey links</div>', unsafe_allow_html=True)
-
-        if not recent:
-            st.info("No survey links yet.")
-        else:
-            for row in recent:
-                st.markdown(
-                    f"""
-                    <div class="admin-subcard" style="margin-bottom:10px">
+    if recent:
+        st.markdown(
+            '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Recent survey links</div>',
+            unsafe_allow_html=True,
+        )
+        for i in range(0, len(recent), 2):
+            cols = st.columns(2)
+            for j, row in enumerate(recent[i:i + 2]):
+                with cols[j]:
+                    rc = row.get("response_count", 0)
+                    st.markdown(
+                        f"""
+                    <div style="background:rgba(255,255,255,0.12);border-radius:12px;
+                                padding:16px 20px;margin-bottom:10px;
+                                border:1px solid rgba(255,255,255,0.18)">
                         <div style="font-weight:700;font-size:1rem;color:white">{row['label']}</div>
-                        <div class="meta">
-                            Public ID: <strong>{row['id']}</strong> · Mongo OID: <code>{row.get('mongo_oid') or '—'}</code><br>
-                            {row.get('response_count', 0)} response(s) · token: <code>{row['token']}</code>
+                        <div style="font-size:0.78rem;color:rgba(255,255,255,0.55);margin-top:6px">
+                            {rc} response(s) &nbsp;·&nbsp; token:
+                            <code style="font-size:0.75rem">{row['token']}</code>
                         </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        st.markdown("</div>", unsafe_allow_html=True)
+                    </div>""",
+                        unsafe_allow_html=True,
+                    )
 
 # ============================================================================
 # SURVEY RESULTS INDEX
@@ -1454,7 +1775,13 @@ def page_admin_home():
 
 def page_admin_results():
     render_admin_header()
-    st.markdown('<div class="title-xl">SURVEY RESULTS</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        """
+    <div style="text-align:center;font-size:2.6rem;font-weight:800;color:white;
+                letter-spacing:-0.5px;margin:0 0 28px">SURVEY RESULTS</div>""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK", key="back_res"):
@@ -1463,7 +1790,10 @@ def page_admin_results():
 
     sc1, _, sc2 = st.columns([2, 1, 2])
     with sc1:
-        st.markdown('<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Sort by</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Sort by</div>',
+            unsafe_allow_html=True,
+        )
         sort_v = st.radio(
             "_sb",
             ["Year and Semester", "Subjects"],
@@ -1474,7 +1804,10 @@ def page_admin_results():
         st.session_state.sort_by = "semester" if "Semester" in sort_v else "subject"
 
     with sc2:
-        st.markdown('<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:0.82rem;font-weight:700;color:white;margin-bottom:8px">Order</div>',
+            unsafe_allow_html=True,
+        )
         ord_v = st.radio(
             "_ob",
             ["Ascending", "Descending"],
@@ -1491,33 +1824,28 @@ def page_admin_results():
         if not rows:
             st.info("No survey links yet. Generate one from Admin home.")
             return
-
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
             for j, row in enumerate(rows[i:i + 2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
-                    label = f"{row['label'].upper()}  ({row.get('response_count', 0)} RESPONSES)"
-                    if st.button(label, key=f"s_{row['id']}", use_container_width=True):
+                    cnt = row.get("response_count", 0)
+                    lbl = f"{row['label'].upper()}  ({cnt} RESPONSES)"
+                    if st.button(lbl, key=f"s_{row['id']}", use_container_width=True):
                         go_admin("detail_semester", drill_link_id=row["id"])
                     st.markdown("</div>", unsafe_allow_html=True)
-                    st.markdown(
-                        f'<div class="meta" style="text-align:center;margin:-4px 0 10px">ID {row["id"]} · OID <code>{row.get("mongo_oid") or "—"}</code></div>',
-                        unsafe_allow_html=True,
-                    )
     else:
         rows = get_results_index_subject(st.session_state.sort_order)
         if not rows:
             st.info("No responses with subject data yet.")
             return
-
         for i in range(0, len(rows), 2):
             cols = st.columns(2)
             for j, row in enumerate(rows[i:i + 2]):
                 with cols[j]:
                     st.markdown('<div class="pill-btn">', unsafe_allow_html=True)
-                    label = f'{row["subject_name"]}  ({row["cnt"]})'
-                    if st.button(label, key=f"subj_{row['subject_name']}", use_container_width=True):
+                    lbl = f"{row['subject_name']}  ({row['cnt']})"
+                    if st.button(lbl, key=f"subj_{row['subject_name']}", use_container_width=True):
                         go_admin("detail_subject", drill_subject=row["subject_name"])
                     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1536,7 +1864,13 @@ def page_admin_detail_semester():
         st.error("Semester not found.")
         return
 
-    st.markdown(f'<div class="title-lg">{link["label"]}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+    <div style="text-align:center;font-size:2rem;font-weight:800;color:white;margin:0 0 24px">
+        {link['label']}
+    </div>""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK TO RESULTS", key="back_det_sem"):
@@ -1544,113 +1878,77 @@ def page_admin_detail_semester():
     st.markdown("</div><br>", unsafe_allow_html=True)
 
     rating_qs = [q for q in questions if q["question_type"] == "rating"]
-    all_ratings = []
-    subject_counts = {}
-
+    all_r = []
     for r in responses:
-        answers = parse_answers(r)
-        subj = r.get("subject_name") or "Not specified"
-        subject_counts[subj] = subject_counts.get(subj, 0) + 1
+        ans = parse_answers(r)
         for rq in rating_qs:
-            v = safe_int(answers.get(str(rq["id"])))
+            v = safe_int(ans.get(str(rq["id"])))
             if v is not None:
-                all_ratings.append(v)
-
-    avg_rating = f"{sum(all_ratings) / len(all_ratings):.1f}/5" if all_ratings else "N/A"
-    unique_s = len(set(r["subject_name"] for r in responses if r.get("subject_name")))
+                all_r.append(v)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Responses", len(responses))
-    c2.metric("Avg Rating", avg_rating)
+    c2.metric("Avg Rating", f"{sum(all_r)/len(all_r):.1f}/5" if all_r else "N/A")
+    unique_s = len(set(r["subject_name"] for r in responses if r.get("subject_name")))
     c3.metric("Subjects", unique_s)
-
-    info1, info2 = st.columns(2)
-    with info1:
-        st.markdown(
-            f"""
-            <div class="admin-subcard" style="margin-top:8px">
-                <div class="meta">
-                    Public Link ID: <strong>{link["id"]}</strong><br>
-                    Mongo OID: <code>{link.get("mongo_oid") or "—"}</code><br>
-                    Token: <code>{link["token"]}</code>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with info2:
-        st.markdown(
-            f"""
-            <div class="admin-subcard" style="margin-top:8px">
-                <div class="meta">
-                    Created At: <strong>{link.get("created_at", "—")}</strong><br>
-                    Responses Loaded: <strong>{len(responses)}</strong>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
     if not responses:
         st.info("No responses yet.")
         return
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown('<div class="title-md">Responses by subject</div>', unsafe_allow_html=True)
-    if subject_counts:
-        df_sc = pd.DataFrame(subject_counts.items(), columns=["Subject", "Count"]).sort_values("Count", ascending=False)
+    st.markdown(
+        '<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">Responses by subject</div>',
+        unsafe_allow_html=True,
+    )
+    sc = {}
+    for r in responses:
+        s = r.get("subject_name") or "Not specified"
+        sc[s] = sc.get(s, 0) + 1
+    if sc:
+        df_sc = pd.DataFrame(sc.items(), columns=["Subject", "Count"]).sort_values("Count", ascending=False)
         st.bar_chart(df_sc.set_index("Subject"))
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown(f'<div class="title-md">{len(responses)} Individual Responses</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="font-weight:700;color:white;font-size:0.95rem;margin-bottom:12px">{len(responses)} Individual Responses</div>',
+        unsafe_allow_html=True,
+    )
 
     for i, r in enumerate(responses):
-        answers = parse_answers(r)
+        ans = parse_answers(r)
         subj = r.get("subject_name") or "Unknown"
         date = r["submitted_at"][:10] if r.get("submitted_at") else "—"
-        header = f"Response #{i+1} — {subj} — {date}"
-        with st.expander(header):
-            st.markdown(
-                f"""
-                <div class="meta" style="margin-bottom:12px">
-                    Response ID: <strong>{r.get("id")}</strong> · Mongo OID: <code>{r.get("mongo_oid") or "—"}</code>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        with st.expander(f"Response #{i+1} — {subj} — {date}"):
             for q in questions:
-                val = answers.get(str(q["id"]), "—")
+                val = ans.get(str(q["id"]), "—")
                 stars = "⭐" * int(val) if q["question_type"] == "rating" and str(val).isdigit() else ""
                 st.markdown(
                     f"""
-                    <div style="margin-bottom:14px">
-                        <div style="font-size:0.74rem;font-weight:600;color:rgba(255,255,255,0.45);margin-bottom:3px">
-                            {q['question_text']}
-                        </div>
-                        <div style="font-size:0.92rem;color:white">{val} {stars}</div>
+                <div style="margin-bottom:14px">
+                    <div style="font-size:0.74rem;font-weight:600;color:rgba(255,255,255,0.45);margin-bottom:3px">
+                        {q['question_text']}
                     </div>
-                    """,
+                    <div style="font-size:0.92rem;color:white">{val} {stars}</div>
+                </div>""",
                     unsafe_allow_html=True,
                 )
 
+    st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
     rows_exp = []
     for r in responses:
-        answers = parse_answers(r)
         rd = {
             "Semester": link["label"],
-            "Semester Link ID": link["id"],
-            "Semester Link Mongo OID": link.get("mongo_oid"),
-            "Response ID": r.get("id"),
-            "Response Mongo OID": r.get("mongo_oid"),
             "Subject": r.get("subject_name"),
             "Date": r.get("submitted_at"),
+            "Response ID": r.get("id"),
+            "Response Mongo OID": r.get("mongo_oid"),
         }
+        ans = parse_answers(r)
         for q in questions:
-            rd[q["question_text"]] = answers.get(str(q["id"]), "")
+            rd[q["question_text"]] = ans.get(str(q["id"]), "")
         rows_exp.append(rd)
-
     if rows_exp:
-        st.markdown('<hr style="margin:20px 0">', unsafe_allow_html=True)
         fn = f"responses_{link['label'].replace(' ', '_')}.csv"
         st.download_button(
             "⬇ Export CSV",
@@ -1670,25 +1968,31 @@ def page_admin_detail_subject():
     subj = st.session_state.drill_subject
     questions, link_map, responses = get_subject_detail_bundle(subj)
 
-    st.markdown(f'<div class="title-lg">{subj}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+    <div style="text-align:center;font-size:2rem;font-weight:800;color:white;margin:0 0 24px">
+        {subj}
+    </div>""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK TO RESULTS", key="back_det_subj"):
         go_admin("results")
     st.markdown("</div><br>", unsafe_allow_html=True)
 
-    all_ratings = []
+    all_r = []
     for r in responses:
-        answers = parse_answers(r)
+        ans = parse_answers(r)
         for q in questions:
             if q["question_type"] == "rating":
-                v = safe_int(answers.get(str(q["id"])))
+                v = safe_int(ans.get(str(q["id"])))
                 if v is not None:
-                    all_ratings.append(v)
+                    all_r.append(v)
 
     c1, c2 = st.columns(2)
     c1.metric("Total Responses", len(responses))
-    c2.metric("Avg Rating", f"{sum(all_ratings)/len(all_ratings):.1f}/5" if all_ratings else "N/A")
+    c2.metric("Avg Rating", f"{sum(all_r)/len(all_r):.1f}/5" if all_r else "N/A")
 
     if not responses:
         st.info("No responses for this subject.")
@@ -1696,35 +2000,23 @@ def page_admin_detail_subject():
 
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
     for i, r in enumerate(responses):
-        answers = parse_answers(r)
-        sem = link_map.get(r["link_id"], {})
-        sem_label = sem.get("label", "Unknown")
-        sem_oid = sem.get("mongo_oid")
+        ans = parse_answers(r)
+        sem_label = link_map.get(r["link_id"], {}).get("label", "Unknown")
         safe_date = r["submitted_at"][:10] if r.get("submitted_at") else "—"
         with st.expander(f"Response #{i+1} — {sem_label} — {safe_date}"):
-            st.markdown(
-                f"""
-                <div class="meta" style="margin-bottom:12px">
-                    Response ID: <strong>{r.get("id")}</strong> · Response OID: <code>{r.get("mongo_oid") or "—"}</code><br>
-                    Semester Link ID: <strong>{r.get("link_id")}</strong> · Semester OID: <code>{sem_oid or "—"}</code>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
             for q in questions:
                 if q["question_type"] == "dropdown":
                     continue
-                val = answers.get(str(q["id"]), "—")
+                val = ans.get(str(q["id"]), "—")
                 stars = "⭐" * int(val) if q["question_type"] == "rating" and str(val).isdigit() else ""
                 st.markdown(
                     f"""
-                    <div style="margin-bottom:14px">
-                        <div style="font-size:0.74rem;font-weight:600;color:rgba(255,255,255,0.45);margin-bottom:3px">
-                            {q['question_text']}
-                        </div>
-                        <div style="font-size:0.92rem;color:white">{val} {stars}</div>
+                <div style="margin-bottom:14px">
+                    <div style="font-size:0.74rem;font-weight:600;color:rgba(255,255,255,0.45);margin-bottom:3px">
+                        {q['question_text']}
                     </div>
-                    """,
+                    <div style="font-size:0.92rem;color:white">{val} {stars}</div>
+                </div>""",
                     unsafe_allow_html=True,
                 )
 
@@ -1735,7 +2027,13 @@ def page_admin_detail_subject():
 
 def page_admin_edit():
     render_admin_header()
-    st.markdown('<div class="title-xl">EDIT SURVEY</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        """
+    <div style="text-align:center;font-size:2.4rem;font-weight:800;color:white;
+                letter-spacing:-0.5px;margin:0 0 24px">EDIT SURVEY</div>""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="back-btn">', unsafe_allow_html=True)
     if st.button("← BACK", key="back_edit"):
@@ -1750,47 +2048,60 @@ def page_admin_edit():
     TYPE_MAP = dict(zip(TYPE_OPTS, TYPE_LABELS))
     TYPE_REV = dict(zip(TYPE_LABELS, TYPE_OPTS))
 
-    st.markdown('<div class="admin-card">', unsafe_allow_html=True)
-
-    h0, h1, h2, h3, h4 = st.columns([0.6, 4, 2, 1.5, 1.2])
+    h0, h1, h2, h3, h4 = st.columns([0.5, 4, 2, 1.5, 1.2])
     for txt, col in [("No.", h0), ("Question", h1), ("Type", h2), ("AI Check", h3), ("Remove", h4)]:
         col.markdown(
-            f'<div style="font-size:0.78rem;font-weight:700;color:rgba(255,255,255,0.55);padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.2)">{txt}</div>',
+            f'<div style="font-size:0.78rem;font-weight:700;color:rgba(255,255,255,0.55);'
+            f'padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.2)">{txt}</div>',
             unsafe_allow_html=True,
         )
 
     st.markdown("")
 
     for i, q in enumerate(questions):
-        c0, c1, c2, c3, c4 = st.columns([0.6, 4, 2, 1.5, 1.2])
+        c0, c1, c2, c3, c4 = st.columns([0.5, 4, 2, 1.5, 1.2])
         with c0:
             st.markdown(
                 f'<div style="padding:14px 0;font-size:0.9rem;color:rgba(255,255,255,0.7)">{i+1}</div>',
                 unsafe_allow_html=True,
             )
         with c1:
-            st.text_input("_", value=q["question_text"], label_visibility="collapsed", key=f"qt_{q['id']}")
+            st.text_input(
+                "_",
+                value=q["question_text"],
+                label_visibility="collapsed",
+                key=f"qt_{q['id']}",
+            )
         with c2:
             cur_lbl = TYPE_MAP.get(q["question_type"], "Text")
             idx = TYPE_LABELS.index(cur_lbl) if cur_lbl in TYPE_LABELS else 1
-            st.selectbox("_", TYPE_LABELS, index=idx, label_visibility="collapsed", key=f"qtp_{q['id']}")
+            st.selectbox(
+                "_",
+                TYPE_LABELS,
+                index=idx,
+                label_visibility="collapsed",
+                key=f"qtp_{q['id']}",
+            )
         with c3:
             current_type = TYPE_REV.get(st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"])), q["question_type"])
             if current_type == "text":
-                st.toggle("🤖", value=bool(q.get("ai_moderated", 0)), key=f"qai_{q['id']}", help="Enable AI moderation")
+                st.toggle(
+                    "🤖",
+                    value=bool(q.get("ai_moderated", 0)),
+                    key=f"qai_{q['id']}",
+                    help="Enable AI moderation for this answer",
+                )
             else:
-                st.markdown('<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
+                    unsafe_allow_html=True,
+                )
         with c4:
             st.markdown('<div class="rem-btn">', unsafe_allow_html=True)
             if st.button("−", key=f"rm_{q['id']}"):
                 soft_remove_question(q["id"])
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown(
-            f'<div class="meta" style="margin:-8px 0 12px 0">Question ID {q["id"]} · Mongo OID <code>{q.get("mongo_oid") or "—"}</code></div>',
-            unsafe_allow_html=True,
-        )
 
     st.markdown("<br>", unsafe_allow_html=True)
     _, sc, _ = st.columns([1, 2, 1])
@@ -1799,13 +2110,13 @@ def page_admin_edit():
         if st.button("💾 SAVE ALL CHANGES", use_container_width=True, key="save_all"):
             payload = []
             for q in questions:
-                qt = st.session_state.get(f"qt_{q['id']}", q["question_text"]).strip()
-                qtype_lbl = st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"]))
-                qtype = TYPE_REV.get(qtype_lbl, q["question_type"])
+                nt = st.session_state.get(f"qt_{q['id']}", q["question_text"]).strip()
+                nl = st.session_state.get(f"qtp_{q['id']}", TYPE_MAP.get(q["question_type"]))
+                qtype = TYPE_REV.get(nl, q["question_type"])
                 payload.append(
                     {
                         "id": q["id"],
-                        "question_text": qt,
+                        "question_text": nt,
                         "question_type": qtype,
                         "ai_moderated": 1 if (qtype == "text" and st.session_state.get(f"qai_{q['id']}", False)) else 0,
                     }
@@ -1814,28 +2125,46 @@ def page_admin_edit():
             st.success("Saved!")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
     st.markdown('<hr style="margin:24px 0">', unsafe_allow_html=True)
-    st.markdown('<div class="admin-card">', unsafe_allow_html=True)
-    st.markdown('<div class="title-md">Add new question</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:10px">Add new question</div>',
+        unsafe_allow_html=True,
+    )
 
-    na0, na1, na2, na3, na4 = st.columns([0.6, 4, 2, 1.5, 1.2])
+    na0, na1, na2, na3, na4 = st.columns([0.5, 4, 2, 1.5, 1.2])
     with na0:
         st.markdown(
             f'<div style="padding:14px 0;font-size:0.9rem;color:rgba(255,255,255,0.35)">{len(questions)+1}</div>',
             unsafe_allow_html=True,
         )
     with na1:
-        nq_text = st.text_input("_", placeholder="New question text…", label_visibility="collapsed", key="nq_text")
+        nq_text = st.text_input(
+            "_",
+            placeholder="New question text…",
+            label_visibility="collapsed",
+            key="nq_text",
+        )
     with na2:
-        nq_type_lbl = st.selectbox("_", TYPE_LABELS, label_visibility="collapsed", key="nq_type")
+        nq_type_lbl = st.selectbox(
+            "_",
+            TYPE_LABELS,
+            label_visibility="collapsed",
+            key="nq_type",
+        )
     with na3:
         if nq_type_lbl == "Text":
-            nq_ai = st.toggle("🤖", value=False, key="nq_ai", help="Enable AI moderation")
+            nq_ai = st.toggle(
+                "🤖",
+                value=False,
+                key="nq_ai",
+                help="Enable AI moderation for this answer",
+            )
         else:
             nq_ai = False
-            st.markdown('<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div style="padding:14px 0;font-size:0.8rem;color:rgba(255,255,255,0.25)">—</div>',
+                unsafe_allow_html=True,
+            )
     with na4:
         st.markdown('<div class="add-btn">', unsafe_allow_html=True)
         if st.button("＋", key="add_q"):
@@ -1846,22 +2175,18 @@ def page_admin_edit():
             else:
                 st.warning("Enter question text.")
         st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<hr style="margin:28px 0">', unsafe_allow_html=True)
-    st.markdown('<div class="admin-card">', unsafe_allow_html=True)
-    st.markdown('<div class="title-md">Subjects (for Dropdown question)</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:1rem;font-weight:700;color:white;margin-bottom:14px">Subjects (for Dropdown question)</div>',
+        unsafe_allow_html=True,
+    )
 
     for subj in subjects:
         s1, s2 = st.columns([7, 1.5])
         with s1:
             st.markdown(
-                f"""
-                <div class="admin-subcard" style="margin-bottom:8px">
-                    <div style="font-size:0.95rem;color:rgba(255,255,255,0.9)">{subj["name"]}</div>
-                    <div class="meta">Subject ID {subj["id"]} · Mongo OID <code>{subj.get("mongo_oid") or "—"}</code></div>
-                </div>
-                """,
+                f'<div style="padding:10px 0;font-size:0.9rem;color:rgba(255,255,255,0.85)">• {subj["name"]}</div>',
                 unsafe_allow_html=True,
             )
         with s2:
@@ -1873,7 +2198,12 @@ def page_admin_edit():
 
     a1, a2 = st.columns([7, 1.5])
     with a1:
-        ns = st.text_input("_", placeholder="Add new subject…", label_visibility="collapsed", key="new_subj")
+        ns = st.text_input(
+            "_",
+            placeholder="Add new subject…",
+            label_visibility="collapsed",
+            key="new_subj",
+        )
     with a2:
         st.markdown('<div class="add-btn">', unsafe_allow_html=True)
         if st.button("＋", key="add_s"):
@@ -1883,8 +2213,6 @@ def page_admin_edit():
             else:
                 st.warning("Enter a subject name.")
         st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================================
 # ADMIN DISPATCHER
