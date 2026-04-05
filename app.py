@@ -1440,7 +1440,6 @@ def page_student(token):
             <div style="text-align:center;padding:100px 0">
                 <div style="font-size:3rem;margin-bottom:16px">🎉</div>
                 <div style="font-size:1.8rem;font-weight:700;color:{FG}">Thank you!</div>
-                <div style="font-size:0.9rem;color:{MUTED}">Your feedback has been recorded anonymously.</div>
             </div>""",
                 unsafe_allow_html=True,
             )
@@ -1457,7 +1456,6 @@ def page_student(token):
         <div style="font-size:0.68rem;letter-spacing:3.5px;text-transform:uppercase;
                     color:{MUTED};margin-bottom:10px;font-weight:600">{link['label']}</div>
         <div style="font-size:2.2rem;font-weight:800;color:{FG};letter-spacing:-0.5px">Course Feedback</div>
-        <div style="font-size:0.82rem;color:{MUTED};margin-top:10px">🔒 All responses are 100% anonymous</div>
     </div>""",
         unsafe_allow_html=True,
     )
@@ -1596,9 +1594,6 @@ def page_landing():
             f"""
         <div style="text-align:center;padding:80px 0 40px">
             <div style="font-size:3rem;font-weight:800;color:{FG};letter-spacing:-2px">CourseVoice</div>
-            <div style="font-size:0.92rem;color:{MUTED};margin-top:10px;margin-bottom:44px">
-                Anonymous course feedback platform
-            </div>
         </div>""",
             unsafe_allow_html=True,
         )
